@@ -53,6 +53,7 @@ Relay is a chat client for local and OpenAI-compatible LLMs, with MCP tools, bui
 1. `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9333" pnpm dev:app` (in the background). It runs beside an installed Relay.
 2. `node scripts/dev/cdp.mjs eval|shot|click|type|key …`. Dev builds expose the store as `window.relay`; `window.__TAURI_INTERNALS__.invoke` reaches every command.
 3. `scripts/dev/shot.sh out.png` takes an in-page screenshot with a stand-in background (CDP can't capture acrylic). `scripts/dev/window-shot.ps1 -Out x.png` captures the real window, but only when it's in front.
+   README screenshots (`docs/images/`) are in-page captures: a neutral stand-in (`#1e1e20` dark, `#f0f0f2` light) where the acrylic would be, the window's exact 1120 × 760, then rounded 8 px corners and a 1 px hairline added afterwards. Never capture the live screen for them: `GetWindowRect` adds Windows 11's invisible resize border (a visible frame of backdrop), and while someone uses the PC, Relay may not be in front, so the capture can pick up their other windows.
 4. `scripts/dev/test-mcp.mjs` is a dependency-free MCP server (add, now, shout, fail): add it as `node <path>`.
 5. A local OpenAI-compatible server makes the best test; reasoning models exercise the thinking UI.
 6. A reply that finishes while the window isn't focused sends a real Holster notification (only from the installed identity).

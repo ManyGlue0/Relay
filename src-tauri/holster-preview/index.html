@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Relay</title>
+    <style>
+      :root {
+        --text: #1a1a1f;
+        --text-2: #55555f;
+        --text-3: #8b8b95;
+        --surface: rgba(255, 255, 255, 0.7);
+        --hover: rgba(255, 255, 255, 0.92);
+        --border: rgba(20, 20, 40, 0.08);
+        --sky-bg: #e1eefc;
+        --sky-strong: #5797de;
+        --sky-ink: #1d4b7c;
+        --online: #3fbf7f;
+        color-scheme: light;
+      }
+      :root[data-theme="dark"] {
+        --text: #f2f2f5;
+        --text-2: #b4b4be;
+        --text-3: #85858f;
+        --surface: rgba(255, 255, 255, 0.055);
+        --hover: rgba(255, 255, 255, 0.09);
+        --border: rgba(255, 255, 255, 0.08);
+        --sky-bg: #1e2f47;
+        --sky-strong: #89bcf2;
+        --sky-ink: #d4e7fb;
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        color: var(--text);
+        font: 13.5px/1.45 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        user-select: none;
+        cursor: default;
+      }
+      main {
+        padding: 14px;
+      }
+      .head {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        height: 16px;
+        margin: 0 2px 10px;
+      }
+      .label {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--text-3);
+        letter-spacing: 0.01em;
+      }
+      .dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--text-3);
+        opacity: 0.6;
+      }
+      .running .dot {
+        background: var(--online);
+        opacity: 1;
+        box-shadow: 0 0 0 3px rgba(63, 191, 127, 0.17);
+      }
+      .rows {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: 50px;
+        padding: 0 10px;
+        border-radius: 12px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        transition: background 0.15s ease;
+      }
+      .running .row.chat {
+        cursor: pointer;
+      }
+      .running .row.chat:hover {
+        background: var(--hover);
+      }
+      .running .row.chat:active {
+        transform: scale(0.985);
+      }
+      .well {
+        width: 28px;
+        height: 28px;
+        flex: none;
+        border-radius: 9px;
+        display: grid;
+        place-items: center;
+        color: var(--sky-ink);
+        background: var(--sky-bg);
+      }
+      .well svg {
+        width: 15px;
+        height: 15px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2.1;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .streaming .well svg {
+        animation: breathe 1.4s ease-in-out infinite;
+      }
+      @keyframes breathe {
+        50% {
+          opacity: 0.35;
+        }
+      }
+      .text {
+        min-width: 0;
+        flex: 1;
+      }
+      .top {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+      }
+      .title {
+        flex: 1;
+        min-width: 0;
+        font-size: 13px;
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .when {
+        flex: none;
+        font-size: 11px;
+        color: var(--text-3);
+        font-variant-numeric: tabular-nums;
+      }
+      .desc {
+        font-size: 11.5px;
+        color: var(--text-3);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="head"><span class="dot"></span><span class="label">Relay</span></div>
+      <div class="rows" id="rows"></div>
+    </main>
+    <script>
+      const ICON_CHAT =
+        '<svg viewBox="0 0 24 24"><path d="M22 17a2 2 0 0 1-2 2H6.83a2 2 0 0 0-1.41.59l-2.2 2.2A.71.71 0 0 1 2 21.3V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/></svg>';
+      const ICON_DOTS =
+        '<svg viewBox="0 0 24 24"><path d="M22 17a2 2 0 0 1-2 2H6.83a2 2 0 0 0-1.41.59l-2.2 2.2A.71.71 0 0 1 2 21.3V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/><path d="M7 11h.01M12 11h.01M17 11h.01"/></svg>';
+      const ICON_EMPTY =
+        '<svg viewBox="0 0 24 24"><path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/></svg>';
+
+      const q = new URLSearchParams(location.search);
+      let running = q.get("running") === "1";
+      let state = null;
+      const setTheme = (t) => (document.documentElement.dataset.theme = t === "dark" ? "dark" : "light");
+      const setRunning = (on) => {
+        running = on;
+        document.body.classList.toggle("running", on);
+      };
+      const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+      function when(ms) {
+        const d = new Date(ms);
+        const now = new Date();
+        const mins = Math.round((now - d) / 60000);
+        if (mins < 1) return "now";
+        if (mins < 60) return `${mins}m`;
+        if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+        const days = Math.round((now - d) / 86400000);
+        if (days < 7) return d.toLocaleDateString([], { weekday: "short" });
+        return d.toLocaleDateString([], { month: "short", day: "numeric" });
+      }
+
+      function render() {
+        const rows = document.getElementById("rows");
+        const chats = state?.chats ?? [];
+        if (!chats.length) {
+          rows.innerHTML = `<div class="row"><div class="well">${ICON_EMPTY}</div><div class="text"><div class="title">No chats yet</div><div class="desc">Open Relay to start one</div></div></div>`;
+          return;
+        }
+        rows.innerHTML = chats
+          .map(
+            (c) => `<div class="row chat ${c.streaming ? "streaming" : ""}" data-id="${esc(c.id)}">
+              <div class="well">${c.streaming ? ICON_DOTS : ICON_CHAT}</div>
+              <div class="text">
+                <div class="top"><span class="title">${esc(c.title || "New chat")}</span><span class="when">${c.streaming ? "replying" : when(c.at)}</span></div>
+                <div class="desc">${esc(c.snippet || c.model || "")}</div>
+              </div>
+            </div>`,
+          )
+          .join("");
+      }
+
+      let lastHeight = 0;
+      function fit() {
+        const h = Math.ceil(document.querySelector("main").getBoundingClientRect().height);
+        if (h && h !== lastHeight) {
+          lastHeight = h;
+          parent.postMessage({ holster: "resize", width: 300, height: h }, "*");
+        }
+      }
+
+      async function refresh() {
+        state = await fetch("state.json", { cache: "no-store" })
+          .then((r) => r.json())
+          .catch(() => state);
+        render();
+        fit();
+      }
+
+      document.addEventListener("click", (e) => {
+        const row = e.target.closest(".row.chat");
+        if (!row || !running || !state?.port) return;
+        // A simple request (text/plain, no-cors): no preflight needed.
+        fetch(`http://127.0.0.1:${state.port}/holster/open-chat`, {
+          method: "POST",
+          mode: "no-cors",
+          headers: { "Content-Type": "text/plain" },
+          body: JSON.stringify({ id: row.dataset.id }),
+        }).catch(() => {});
+      });
+
+      setTheme(q.get("theme"));
+      setRunning(running);
+      refresh();
+      addEventListener("message", (e) => {
+        if (e.data?.holster === "theme") setTheme(e.data.value);
+        if (e.data?.holster === "status") setRunning(e.data.running);
+        if (e.data?.holster === "show") refresh();
+      });
+    </script>
+  </body>
+</html>

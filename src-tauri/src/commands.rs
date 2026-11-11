@@ -1,0 +1,745 @@
+//! Tauri commands: everything the UI asks of the backend.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tauri::{AppHandle, Emitter, State};
+
+use crate::db::{new_id, now_ms, Chat, ChatOptions, ChatSummary, McpServer, Message, Preset, Provider, SearchHit, Usage};
+use crate::mcp::{self, ServerStatus};
+use crate::settings::Settings;
+use crate::{chat, holster, llm, secrets, skills, Core};
+
+type CoreState<'a> = State<'a, Arc<Core>>;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInfo {
+    version: String,
+    data_dir: String,
+}
+
+/// Asks GitHub for a newer Relay (Settings → About → Updates).
+#[tauri::command]
+pub async fn update_check(app: AppHandle, pending: tauri::State<'_, crate::update::Pending>) -> Result<Option<crate::update::Available>, String> {
+    crate::update::check(&app, &pending).await
+}
+
+/// Downloads, verifies and runs the update `update_check` found.
+#[tauri::command]
+pub async fn update_install(app: AppHandle, pending: tauri::State<'_, crate::update::Pending>) -> Result<(), String> {
+    crate::update::install(&app, &pending).await
+}
+
+#[tauri::command]
+pub fn app_info(core: CoreState) -> AppInfo {
+    AppInfo { version: env!("CARGO_PKG_VERSION").into(), data_dir: core.data_dir.display().to_string() }
+}
+
+#[tauri::command]
+pub fn get_settings(core: CoreState) -> Settings {
+    core.prefs.get()
+}
+
+#[tauri::command]
+pub fn update_settings(app: AppHandle, core: CoreState, patch: Value) -> Result<Settings, String> {
+    let before = core.prefs.get();
+    let after = core.prefs.patch(patch)?;
+    crate::apply_settings_change(&app, &before, &after);
+    Ok(after)
+}
+
+/// What the model is told before the conversation, with the current settings.
+#[tauri::command]
+pub fn system_prompt_preview(core: CoreState, preset_id: Option<String>) -> String {
+    let preset = preset_id.as_deref().and_then(|id| core.db.preset(id).ok().flatten());
+    chat::system_prompt(&core, preset.as_ref(), "")
+}
+
+// ---- skills -----------------------------------------------------------------------
+
+#[tauri::command]
+pub fn skills_list(core: CoreState) -> Vec<skills::Skill> {
+    skills::list(&core)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsInfo {
+    /// What models get in the system prompt (in chats that use tools).
+    prompt: String,
+    folder: String,
+    workspace: String,
+}
+
+#[tauri::command]
+pub fn skills_info(core: CoreState) -> SkillsInfo {
+    SkillsInfo {
+        prompt: skills::prompt_block(&skills::usable(&core)).unwrap_or_default(),
+        folder: skills::root(&core).display().to_string(),
+        workspace: skills::workspace(&core).display().to_string(),
+    }
+}
+
+#[tauri::command]
+pub fn skill_save(app: AppHandle, core: CoreState, id: Option<String>, name: String, description: String, body: String) -> Result<skills::Skill, String> {
+    let s = skills::save(&core, id.as_deref().filter(|i| !i.is_empty()), &name, &description, &body)?;
+    let _ = app.emit("skills-changed", ());
+    Ok(s)
+}
+
+#[tauri::command]
+pub fn skill_delete(app: AppHandle, core: CoreState, id: String) -> Result<(), String> {
+    skills::delete(&core, &id)?;
+    let _ = app.emit("skills-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn skill_set(app: AppHandle, core: CoreState, id: String, enabled: Option<bool>, scripts_allowed: Option<bool>) {
+    skills::set_flags(&core, &id, enabled, scripts_allowed);
+    let _ = app.emit("skills-changed", ());
+}
+
+#[tauri::command]
+pub fn skill_import(app: AppHandle, core: CoreState, path: String) -> Result<skills::Imported, String> {
+    let out = skills::import(&core, std::path::Path::new(&path))?;
+    let _ = app.emit("skills-changed", ());
+    Ok(out)
+}
+
+/// Opens a skill's folder, the skills folder ("") or the scripts' workspace ("workspace").
+#[tauri::command]
+pub fn skills_open_folder(app: AppHandle, core: CoreState, which: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let path = match which.as_str() {
+        "" => skills::root(&core),
+        "workspace" => skills::workspace(&core),
+        id if !id.contains(['/', '\\']) && id != ".." => skills::root(&core).join(id),
+        _ => return Err("That isn't a folder Relay knows".into()),
+    };
+    std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+    app.opener().open_path(path.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
+}
+
+// ---- providers --------------------------------------------------------------------
+
+#[tauri::command]
+pub fn providers_list(core: CoreState) -> Result<Vec<Provider>, String> {
+    core.db.providers()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderInput {
+    id: Option<String>,
+    name: String,
+    base_url: String,
+    #[serde(default)]
+    custom_models: Vec<String>,
+    /// None leaves the stored key alone; an empty string removes it.
+    key: Option<String>,
+    /// The model list a successful test just fetched.
+    models: Option<Vec<String>>,
+    /// Context windows the user set by hand (0: detect again).
+    contexts: Option<HashMap<String, u64>>,
+    /// Show every model the server lists (else only `custom_models`).
+    show_all: Option<bool>,
+    /// None leaves the icon alone; "" goes back to the one chosen from the address.
+    icon: Option<String>,
+}
+
+#[tauri::command]
+pub fn provider_save(core: CoreState, input: ProviderInput) -> Result<Provider, String> {
+    let name = input.name.trim();
+    let base_url = llm::normalize_base(&input.base_url);
+    if name.is_empty() {
+        return Err("Give the provider a name".into());
+    }
+    if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+        return Err("The address should start with http:// or https://".into());
+    }
+    let existing = match &input.id {
+        Some(id) => core.db.provider(id)?,
+        None => None,
+    };
+    let sort = existing.as_ref().map(|p| p.sort).unwrap_or_else(|| core.db.providers().map(|v| v.len() as i64).unwrap_or(0));
+    let mut p = existing.unwrap_or(Provider {
+        id: new_id(),
+        name: String::new(),
+        base_url: String::new(),
+        models: Vec::new(),
+        models_at: 0,
+        custom_models: Vec::new(),
+        show_all: true,
+        icon: None,
+        contexts: HashMap::new(),
+        has_key: false,
+        sort,
+    });
+    if let Some(all) = input.show_all {
+        p.show_all = all;
+    }
+    if let Some(icon) = input.icon.as_deref().map(str::trim) {
+        p.icon = if icon.is_empty() { None } else { Some(valid_icon(icon)?.to_string()) };
+    }
+    if p.base_url != base_url {
+        p.models.clear();
+        p.models_at = 0;
+        p.contexts.clear();
+    }
+    p.name = name.to_string();
+    p.base_url = base_url;
+    p.custom_models = input.custom_models.into_iter().map(|m| m.trim().to_string()).filter(|m| !m.is_empty()).collect();
+    p.custom_models.dedup();
+    if let Some(models) = input.models {
+        p.models = models;
+        p.models_at = now_ms();
+    }
+    if let Some(ctx) = input.contexts {
+        for (model, n) in ctx {
+            if n == 0 {
+                p.contexts.remove(&model);
+            } else {
+                p.contexts.insert(model, n);
+            }
+        }
+    }
+    match input.key.as_deref().map(str::trim) {
+        Some("") => {
+            secrets::delete_key(&p.id)?;
+            p.has_key = false;
+        }
+        Some(key) => {
+            secrets::set_key(&p.id, key)?;
+            p.has_key = true;
+        }
+        None => {}
+    }
+    core.db.save_provider(&p)?;
+    Ok(p)
+}
+
+/// Largest image a provider icon may be (it's stored in the database).
+const ICON_MAX: u64 = 256 * 1024;
+
+fn valid_icon(icon: &str) -> Result<&str, String> {
+    let named = |p: &str| icon.strip_prefix(p).is_some_and(|n| !n.is_empty() && n.len() <= 40 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    if named("brand:") || named("lucide:") {
+        return Ok(icon);
+    }
+    if icon.starts_with("data:image/") && icon.contains(";base64,") && (icon.len() as u64) < ICON_MAX * 4 / 3 + 64 {
+        return Ok(icon);
+    }
+    Err("That icon can't be used".into())
+}
+
+/// Reads an image for a provider's icon and returns it as a data URL.
+#[tauri::command]
+pub fn icon_from_file(path: String) -> Result<String, String> {
+    use base64::Engine as _;
+    let path = std::path::Path::new(&path);
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        _ => return Err("Pick a PNG, JPG, WebP, GIF, SVG or ICO image".into()),
+    };
+    let size = std::fs::metadata(path).map_err(|e| format!("Couldn't read that file ({e})"))?.len();
+    if size > ICON_MAX {
+        return Err(format!("That image is {} KB; icons can be up to {} KB", size / 1024, ICON_MAX / 1024));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("Couldn't read that file ({e})"))?;
+    Ok(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
+#[tauri::command]
+pub fn provider_delete(core: CoreState, id: String) -> Result<(), String> {
+    let _ = secrets::delete_key(&id);
+    core.db.delete_provider(&id)
+}
+
+/// Asks an endpoint for its models. Used to test a provider before saving it
+/// (`key` as typed, or the stored key of `id` when the field was left alone).
+#[tauri::command]
+pub async fn provider_test(base_url: String, key: Option<String>, id: Option<String>) -> Result<Vec<String>, String> {
+    let key = key.or_else(|| id.as_deref().and_then(secrets::key));
+    llm::list_models(&base_url, key.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn provider_refresh(core: CoreState<'_>, id: String) -> Result<Provider, String> {
+    let mut p = core.db.provider(&id)?.ok_or("That provider was removed")?;
+    let key = secrets::key(&p.id);
+    p.models = llm::list_models(&p.base_url, key.as_deref()).await?;
+    p.models_at = now_ms();
+    core.db.save_provider(&p)?;
+    Ok(p)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderStatus {
+    id: String,
+    online: bool,
+    /// What it lists now; None when it doesn't list models.
+    models: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeResult {
+    statuses: Vec<ProviderStatus>,
+    /// A server's list changed, and Relay saved the new one.
+    changed: bool,
+}
+
+/// Asks every provider, at once, whether it's there and what it lists, for
+/// the model picker's Offline section. A list that changed is saved, so new
+/// models show up (and removed ones go) without pressing refresh.
+#[tauri::command]
+pub async fn providers_probe(core: CoreState<'_>) -> Result<ProbeResult, String> {
+    let providers = core.db.providers()?;
+    let checks = providers.iter().map(|p| {
+        let key = secrets::key(&p.id);
+        let base = p.base_url.clone();
+        async move { llm::probe(&base, key.as_deref()).await }
+    });
+    let answers = futures_util::future::join_all(checks).await;
+    let mut changed = false;
+    let mut statuses = Vec::new();
+    for (mut p, (online, models)) in providers.into_iter().zip(answers) {
+        if let Some(list) = models.as_ref().filter(|l| **l != p.models) {
+            p.models = list.clone();
+            p.models_at = now_ms();
+            if core.db.save_provider(&p).is_ok() {
+                changed = true;
+            }
+        }
+        statuses.push(ProviderStatus { id: p.id, online, models });
+    }
+    Ok(ProbeResult { statuses, changed })
+}
+
+/// The model's context window: set by the user, remembered, or asked of the server.
+#[tauri::command]
+pub async fn model_context(core: CoreState<'_>, provider_id: String, model: String) -> Result<Option<u64>, String> {
+    let Some(p) = core.db.provider(&provider_id)? else { return Ok(None) };
+    if let Some(n) = p.contexts.get(&model) {
+        return Ok(Some(*n));
+    }
+    let key = secrets::key(&p.id);
+    let found = llm::detect_context(&p.base_url, key.as_deref(), &model).await;
+    if let Some(n) = found {
+        // Read again: the user may have edited the provider meanwhile.
+        if let Some(mut fresh) = core.db.provider(&provider_id)? {
+            fresh.contexts.insert(model, n);
+            core.db.save_provider(&fresh)?;
+        }
+    }
+    Ok(found)
+}
+
+// ---- presets --------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn presets_list(core: CoreState) -> Result<Vec<Preset>, String> {
+    core.db.presets()
+}
+
+#[tauri::command]
+pub fn preset_save(core: CoreState, mut preset: Preset) -> Result<Preset, String> {
+    preset.name = preset.name.trim().to_string();
+    if preset.name.is_empty() {
+        return Err("Give the preset a name".into());
+    }
+    if preset.id.is_empty() {
+        preset.id = new_id();
+        preset.sort = core.db.presets().map(|v| v.len() as i64).unwrap_or(0);
+    }
+    preset.temperature = preset.temperature.map(|t| t.clamp(0.0, 2.0));
+    preset.top_p = preset.top_p.map(|t| t.clamp(0.0, 1.0));
+    preset.effort = preset.effort.filter(|e| !e.is_empty());
+    core.db.save_preset(&preset)?;
+    Ok(preset)
+}
+
+#[tauri::command]
+pub fn preset_delete(core: CoreState, id: String) -> Result<(), String> {
+    core.db.delete_preset(&id)?;
+    if core.prefs.get().default_preset.as_deref() == Some(id.as_str()) {
+        core.prefs.update(|s| s.default_preset = None);
+    }
+    Ok(())
+}
+
+// ---- MCP servers ------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpView {
+    #[serde(flatten)]
+    server: McpServer,
+    status: ServerStatus,
+}
+
+#[tauri::command]
+pub fn mcp_list(core: CoreState) -> Result<Vec<McpView>, String> {
+    Ok(core
+        .db
+        .mcp_servers()?
+        .into_iter()
+        .map(|s| {
+            let status = core.mcp.status_of(&s.id).unwrap_or(ServerStatus { id: s.id.clone(), state: "off".into(), ..Default::default() });
+            McpView { server: s, status }
+        })
+        .collect())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpInput {
+    #[serde(flatten)]
+    server: McpServer,
+    /// The environment, whole (None leaves it as it is).
+    env: Option<HashMap<String, String>>,
+    /// None leaves the stored token alone; an empty string removes it.
+    token: Option<String>,
+}
+
+#[tauri::command]
+pub fn mcp_save(app: AppHandle, core: CoreState, input: McpInput) -> Result<McpServer, String> {
+    let mut s = input.server;
+    s.name = s.name.trim().to_string();
+    s.command = s.command.trim().to_string();
+    s.url = s.url.trim().to_string();
+    if s.name.is_empty() {
+        return Err("Give the server a name".into());
+    }
+    if s.kind == "stdio" && s.command.is_empty() {
+        return Err("Add the command that starts the server".into());
+    }
+    if s.kind == "http" && !(s.url.starts_with("http://") || s.url.starts_with("https://")) {
+        return Err("The address should start with http:// or https://".into());
+    }
+    let existing = if s.id.is_empty() { None } else { core.db.mcp_server(&s.id)? };
+    if s.id.is_empty() {
+        s.id = new_id();
+        s.sort = core.db.mcp_servers().map(|v| v.len() as i64).unwrap_or(0);
+    }
+    if let Some(e) = &existing {
+        // Policies change one tool at a time, elsewhere; keep them.
+        s.tool_policy = e.tool_policy.clone();
+        s.default_policy = e.default_policy.clone();
+    }
+    let mut stored = mcp::load_secrets(&s.id);
+    if let Some(env) = input.env {
+        stored.env = env.into_iter().filter(|(k, _)| !k.trim().is_empty()).map(|(k, v)| (k.trim().to_string(), v)).collect();
+    }
+    if let Some(t) = input.token {
+        stored.token = t.trim().to_string();
+    }
+    mcp::save_secrets(&s.id, &stored)?;
+    let mut keys: Vec<String> = stored.env.keys().cloned().collect();
+    keys.sort();
+    s.env_keys = keys;
+    s.has_token = !stored.token.is_empty();
+    core.db.save_mcp_server(&s)?;
+    core.mcp.connect(s.clone());
+    let _ = app.emit("mcp-servers-changed", ());
+    Ok(s)
+}
+
+/// The server's environment values, for editing.
+#[tauri::command]
+pub fn mcp_env(id: String) -> HashMap<String, String> {
+    mcp::load_secrets(&id).env
+}
+
+#[tauri::command]
+pub fn mcp_delete(core: CoreState, id: String) -> Result<(), String> {
+    core.mcp.forget(&id);
+    let _ = mcp::save_secrets(&id, &mcp::Secrets::default());
+    core.db.delete_mcp_server(&id)
+}
+
+#[tauri::command]
+pub fn mcp_restart(core: CoreState, id: String) -> Result<(), String> {
+    let s = core.db.mcp_server(&id)?.ok_or("That server was removed")?;
+    core.mcp.connect(s);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn mcp_set_enabled(core: CoreState, id: String, enabled: bool) -> Result<(), String> {
+    let mut s = core.db.mcp_server(&id)?.ok_or("That server was removed")?;
+    s.enabled = enabled;
+    core.db.save_mcp_server(&s)?;
+    core.mcp.connect(s);
+    Ok(())
+}
+
+/// One tool's policy ("ask" | "allow" | "off"), or the server's default when
+/// `tool` is None (which resets the per-tool ones).
+#[tauri::command]
+pub fn mcp_set_policy(core: CoreState, id: String, tool: Option<String>, policy: String) -> Result<(), String> {
+    if !matches!(policy.as_str(), "ask" | "allow" | "off") {
+        return Err("Unknown policy".into());
+    }
+    let mut s = core.db.mcp_server(&id)?.ok_or("That server was removed")?;
+    match tool {
+        Some(t) => {
+            if policy == s.default_policy {
+                s.tool_policy.remove(&t);
+            } else {
+                s.tool_policy.insert(t, policy);
+            }
+        }
+        None => {
+            s.default_policy = policy;
+            s.tool_policy.clear();
+        }
+    }
+    core.db.save_mcp_server(&s)
+}
+
+/// Adds the servers from a Claude Desktop style JSON config. Returns how many.
+#[tauri::command]
+pub fn mcp_import(app: AppHandle, core: CoreState, text: String) -> Result<usize, String> {
+    let found = mcp::parse_import(&text)?;
+    let mut sort = core.db.mcp_servers().map(|v| v.len() as i64).unwrap_or(0);
+    let n = found.len();
+    for (mut s, stored) in found {
+        s.sort = sort;
+        sort += 1;
+        mcp::save_secrets(&s.id, &stored)?;
+        core.db.save_mcp_server(&s)?;
+        core.mcp.connect(s);
+    }
+    let _ = app.emit("mcp-servers-changed", ());
+    Ok(n)
+}
+
+#[tauri::command]
+pub fn tool_decide(core: CoreState, message_id: String, call_id: String, decision: String) -> Result<(), String> {
+    if !matches!(decision.as_str(), "once" | "always" | "deny") {
+        return Err("Unknown decision".into());
+    }
+    if core.streams.decide(&message_id, &call_id, &decision) {
+        Ok(())
+    } else {
+        Err("That tool call isn't waiting anymore".into())
+    }
+}
+
+// ---- chats --------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn chats_list(core: CoreState) -> Result<Vec<ChatSummary>, String> {
+    core.db.chats()
+}
+
+#[tauri::command]
+pub fn chat_get(core: CoreState, id: String) -> Result<Option<Chat>, String> {
+    let mut chat = core.db.chat(&id)?;
+    if let Some(c) = chat.as_mut() {
+        core.streams.overlay(&mut c.messages);
+    }
+    Ok(chat)
+}
+
+#[tauri::command]
+pub fn chat_rename(app: AppHandle, core: CoreState, id: String, title: String) -> Result<(), String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("A chat needs a name".into());
+    }
+    core.db.set_title(&id, &title.chars().take(120).collect::<String>(), false)?;
+    holster::publish(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn chat_pin(core: CoreState, id: String, pinned: bool) -> Result<(), String> {
+    core.db.set_pinned(&id, pinned)
+}
+
+#[tauri::command]
+pub fn chat_delete(app: AppHandle, core: CoreState, id: String) -> Result<(), String> {
+    core.streams.stop_chat(&id);
+    core.db.delete_chat(&id)?;
+    holster::seen(&id);
+    holster::publish(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn chats_delete_all(app: AppHandle, core: CoreState) -> Result<(), String> {
+    for id in core.streams.active_chats() {
+        core.streams.stop_chat(&id);
+    }
+    core.db.delete_all_chats()?;
+    holster::publish(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn chat_set_model(core: CoreState, id: String, provider_id: String, model: String) -> Result<(), String> {
+    core.db.set_chat_model(&id, &provider_id, &model)
+}
+
+#[tauri::command]
+pub fn chat_set_options(core: CoreState, id: String, options: ChatOptions) -> Result<Option<ChatSummary>, String> {
+    core.db.set_chat_options(&id, &options)?;
+    core.db.chat_summary(&id)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendResult {
+    chat: ChatSummary,
+    user: Option<Message>,
+    assistant: Message,
+}
+
+/// Sends a message; without a `chat_id` it starts a new chat first, with the
+/// options the composer had picked.
+#[tauri::command]
+pub fn chat_send(
+    app: AppHandle,
+    core: CoreState,
+    chat_id: Option<String>,
+    text: String,
+    provider_id: String,
+    model: String,
+    options: Option<ChatOptions>,
+) -> Result<SendResult, String> {
+    if text.trim().is_empty() {
+        return Err("Type a message first".into());
+    }
+    let chat_id = match chat_id {
+        Some(id) => id,
+        None => core.db.create_chat(Some(&provider_id), Some(&model), &options.unwrap_or_default())?.id,
+    };
+    let sent = chat::send(&app, &chat_id, &text, &provider_id, &model)?;
+    let chat = core.db.chat_summary(&chat_id)?.ok_or("That chat no longer exists")?;
+    Ok(SendResult { chat, user: sent.user, assistant: sent.assistant })
+}
+
+/// The chat as it is now (the branch on screen changed).
+fn reloaded(core: &Core, id: &str) -> Result<Chat, String> {
+    let mut chat = core.db.chat(id)?.ok_or("That chat no longer exists")?;
+    core.streams.overlay(&mut chat.messages);
+    Ok(chat)
+}
+
+#[tauri::command]
+pub fn chat_edit(
+    app: AppHandle,
+    core: CoreState,
+    chat_id: String,
+    message_id: String,
+    text: String,
+    provider_id: String,
+    model: String,
+) -> Result<Chat, String> {
+    if text.trim().is_empty() {
+        return Err("The message can't be empty".into());
+    }
+    chat::edit(&app, &chat_id, &message_id, &text, &provider_id, &model)?;
+    reloaded(&core, &chat_id)
+}
+
+#[tauri::command]
+pub fn chat_regenerate(
+    app: AppHandle,
+    core: CoreState,
+    chat_id: String,
+    message_id: String,
+    provider_id: String,
+    model: String,
+) -> Result<Chat, String> {
+    chat::regenerate(&app, &chat_id, &message_id, &provider_id, &model)?;
+    reloaded(&core, &chat_id)
+}
+
+/// Shows another branch: the newest conversation that runs through `message_id`.
+#[tauri::command]
+pub fn chat_branch(core: CoreState, chat_id: String, message_id: String) -> Result<Chat, String> {
+    let leaf = core.db.deepest_leaf(&message_id)?;
+    core.db.set_leaf(&chat_id, &leaf)?;
+    reloaded(&core, &chat_id)
+}
+
+#[tauri::command]
+pub fn chat_stop(core: CoreState, chat_id: String) {
+    core.streams.stop_chat(&chat_id);
+}
+
+#[tauri::command]
+pub fn streaming_chats(core: CoreState) -> Vec<String> {
+    core.streams.active_chats()
+}
+
+#[tauri::command]
+pub fn chat_search(core: CoreState, query: String) -> Result<Vec<SearchHit>, String> {
+    core.db.search(&query, 50)
+}
+
+/// The conversation on screen as Markdown.
+#[tauri::command]
+pub fn chat_markdown(core: CoreState, id: String) -> Result<String, String> {
+    let chat = core.db.chat(&id)?.ok_or("That chat no longer exists")?;
+    let title = if chat.summary.title.is_empty() { "Chat" } else { chat.summary.title.as_str() };
+    let mut out = format!("# {title}\n\n");
+    for m in &chat.messages {
+        let who = if m.role == "user" { "You".to_string() } else { m.model.clone().unwrap_or_else(|| "Assistant".into()) };
+        out.push_str(&format!("**{who}**\n\n{}\n\n", m.content.trim()));
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn usage_stats(core: CoreState, days: Option<i64>) -> Result<Usage, String> {
+    core.db.usage(days.map(|d| d.clamp(1, 36_500)))
+}
+
+// ---- holster & window ------------------------------------------------------------------
+
+#[tauri::command]
+pub fn holster_status() -> holster::HolsterStatus {
+    holster::status()
+}
+
+#[tauri::command]
+pub fn holster_seen(chat_id: String) {
+    holster::seen(&chat_id);
+}
+
+/// The close button: to the tray, or quit (Settings, General).
+#[tauri::command]
+pub fn window_close(app: AppHandle, core: CoreState) {
+    if core.prefs.get().close_action == "quit" {
+        crate::quit(&app);
+    } else {
+        crate::window::hide(&app);
+    }
+}
+
+#[tauri::command]
+pub fn app_quit(app: AppHandle) {
+    crate::quit(&app);
+}
+
+/// Saves the conversation on screen as a Markdown file.
+#[tauri::command]
+pub fn chat_export(core: CoreState, id: String, path: String) -> Result<(), String> {
+    let text = chat_markdown(core, id)?;
+    std::fs::write(&path, text).map_err(|e| format!("Couldn't save the file: {e}"))
+}

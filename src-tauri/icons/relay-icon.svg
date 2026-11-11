@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="112 132 800 800">
+  <defs>
+    <!-- The front bubble cuts a clean gap out of the one behind it. -->
+    <mask id="gap" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <path d="M232 380h318c58 0 104 46 104 104v206c0 58-46 104-104 104H366l-122 100v-100h-12c-58 0-104-46-104-104V484c0-58 46-104 104-104z" fill="#000" stroke="#000" stroke-width="64" stroke-linejoin="round"/>
+    </mask>
+  </defs>
+  <path mask="url(#gap)" d="M474 150h318c58 0 104 46 104 104v206c0 58-46 104-104 104h-28v100L642 564H474c-58 0-104-46-104-104V254c0-58 46-104 104-104z" fill="#B2A2F5"/>
+  <path d="M232 380h318c58 0 104 46 104 104v206c0 58-46 104-104 104H366l-122 100v-100h-12c-58 0-104-46-104-104V484c0-58 46-104 104-104z" fill="#89BCF2"/>
+  <circle cx="282" cy="587" r="38" fill="#1E2F47"/>
+  <circle cx="391" cy="587" r="38" fill="#1E2F47"/>
+  <circle cx="500" cy="587" r="38" fill="#1E2F47"/>
+</svg>

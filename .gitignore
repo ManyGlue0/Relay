@@ -1,0 +1,16 @@
+node_modules
+dist
+target
+src-tauri/gen
+*.log
+scripts/dev/*.png
+*.key
+*.key.pub
+.env
+.env.*
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Installers go on GitHub Releases, not in the repo
+installers/

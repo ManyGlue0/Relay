@@ -1,0 +1,59 @@
+# Relay: notes for Claude
+
+Relay is a chat client for local and OpenAI-compatible LLMs, with MCP tools, built as a Holster dock app in **window** mode (Tauri 2 + React). The README covers what it does for users.
+
+## Map
+
+- `src-tauri/src/`
+  - `lib.rs`: app wiring: `Core` (prefs, db, streams, mcp), tray, autostart, command list, close-button behavior. An identifier ending in `.dev` (Relay Dev) leaves the Holster tile alone.
+  - `window.rs`: frameless acrylic window, ported from Track (Terminal-holster). `taskbar.rs` is Track's taskbar-peek fix, copied as is.
+  - `db.rs`: SQLite schema (v4) and queries: providers (with per-model `contexts`, `show_all` and `icon`), presets, mcp_servers, chats (preset_id, effort, tools), messages. Messages form a **tree** (`parent_id`); `chats.leaf_id` is the end of the branch on screen; `path_to(leaf)` is the conversation; `siblings` are filled per message. `messages.parts` is the reply in order (reasoning, text, tool). `chats.title_auto`: 0 user, 1 provisional, 2 generated. FTS5 `messages_fts` is maintained by hand. `usage()` feeds Stats through `json_extract` on `stats`.
+  - `llm.rs`: the OpenAI-compatible protocol: `/models`, SSE streaming (text, reasoning, tool-call pieces), `OPTIONAL_FIELDS` (dropped and retried on a 400 or 422), context detection, `ThinkSplitter`.
+  - `chat.rs`: send, edit, regenerate; the reply loop (`Job::run`): stream, run tools with approval, ask again, up to `tool_rounds`. `Streams` keeps the live parts per message with a batch counter `seq`, and the pending approvals. `system_prompt` = profile + how messages carry the date + preset + chat; nothing in it changes per message, and each user message starts with its own send time (`stamped`, from `created_at`), so the request prefix never changes and servers keep their prompt cache. Tools are listed in the servers' Settings order for the same reason. `apply_effort` maps effort to request fields.
+  - `mcp.rs`: Relay's own MCP client. Stdio runs through `cmd /d /c` unless the command is an .exe, without a console window, in a kill-on-close job. Streamable HTTP takes JSON or SSE answers and keeps `Mcp-Session-Id`. `tool_alias` = `server__tool`. `parse_import` reads Claude Desktop JSON. Env values and tokens live in Credential Manager (`Relay/mcp/<id>`).
+  - `skills.rs`: Agent Skills. Folders in `<data>\skills\<id>\` (the id is the folder name) with `SKILL.md`; a small frontmatter parser that keeps unknown keys when Relay rewrites the file. `prompt_block` lists the usable skills for the system prompt (only in chats with tools on). Built-in tools on the route server `relay.skills` / `Skills`: `skills__load`, `skills__read_file` (paths stay inside the folder), `skills__run_script` (asks unless the skill is in `settings.skill_scripts`; cwd `<data>\workspace`, `SKILL_DIR` set, the MCP job object, 5-minute limit). `import` takes a folder or a .zip/.skill and replaces a skill of the same name. Off skills: `settings.disabled_skills`.
+  - `update.rs`: the updater, ported from Holster: `latest.json` from the latest GitHub release, verified with the public key in `tauri.conf.json` → `plugins.updater.pubkey`. The plugin is only registered when that key is set (`update::enabled`); `tauri.dev.json` clears it so Relay Dev never updates. Releases: `docs/RELEASING.md`, `pnpm release:build` (`scripts/release-build.mjs`; the first run copies `relay.key.pub` into the config).
+  - `holster.rs`: manifest (black tile + `icons/relay-icon.svg`), loopback routes (`/holster/health`, `/holster/notify`, `/holster/open-chat`), preview `state.json`, reply notifications and the glow. Preferred port **47378** (47366 is TaskManager's).
+  - `secrets.rs`: Windows Credential Manager (`Relay/provider/<id>`, `Relay/mcp/<id>`).
+  - `settings.rs`: `settings.json`, every field defaulted; `Profile::as_prompt`.
+- `src-tauri/holster-preview/index.html`: the preview page (recent chats, clickable while Relay runs).
+- `src/`
+  - `lib/api.ts`: types, invoke wrappers, `partsOf`, `applyOps` (the mirror of `chat.rs::apply`).
+  - `lib/store.ts`: zustand store. `applyDelta` uses `seq`: batches at or below a message's `seq` are already in it, and a gap reloads the chat. Batches for a message the UI doesn't have yet wait in `early`. `draftOptions` hold a new chat's preset, effort and tools until it's sent.
+  - `components/`: `ChatView`, `MessageView` (parts, tool cards with approval, the edit box, regenerate, the branch switcher), `Markdown`, `Composer` (chips: model, effort, preset, tools; the context meter), `ModelPicker` (`ModelMenu`, with arrow keys), `Sidebar` (chats, the collapsed rail, the settings nav), `TitleBar` (`BrandMark`), `ui.tsx`.
+  - `lib/dollars.ts`: `escapeCurrency`, run by `normalizeMath` on prose: a `$` that doesn't pair up the way TeX writers use it (Pandoc's rule, stricter for formulas starting with a digit) is escaped, so "$5 and $10" stays text.
+  - `lib/time.ts`: date groups, `seconds`, and `sentAgo` ("5 minutes ago" after a reply's buttons) with `useNow`, one clock that ticks on the minute.
+  - `components/settings/`: `SettingsPage` (in the pane; the sidebar shows the sections), `kit.tsx` (Page, Group, Row, TextRow, Field, NumberInput, ConfirmButton), and one file per section: General, You, Models, Presets, Tools, Skills, Stats, About.
+- Data: `%APPDATA%\app.relay.desktop\` (`relay.db`, `settings.json`, `holster-preview\`). Relay Dev (`pnpm dev:app`, identifier `app.relay.dev`) has its own folder.
+
+## Rules and gotchas
+
+- Follow the `holster-app` skill: its stack, tokens and springs. Relay's accent is **sky** (`--accent`, `--accent-ink`, `--accent-bg`). Settings follow Track's pattern: titled groups of cards with rows, plain sentence-case labels ("Start with Windows").
+- The icon is one mark with no background (`scripts/icon.svg`, copied to `src-tauri/icons/relay-icon.svg`); Holster draws it on a pitch-black tile. `pnpm icons` regenerates the app icons (delete `android/` and `ios/` after).
+- The Stats bar colors were checked with the dataviz validator: `--chart-bar` #4A86CF light, #4F93E0 dark.
+- Backend events: `stream-delta`, `stream-end`, `chat-updated`, `mcp-status`, `mcp-servers-changed`, `skills-changed`, `open-chat`, `navigate`.
+- Rows that hold a `layoutId` pill (`.side-row`, `.chat-row`) must not clip (`overflow: hidden`) or scale on press, or the pill can't travel between them.
+- Popovers take a `trigger` ref, so a second click on their button closes them, and sit on whole pixels (a fractional left/top made the content snap when the scale animation ended).
+- The sidebar is one column: 8px from its edges, content 11px into each row, so every icon sits at x = 27, the middle of the 54px rail (`RAIL`). Collapsing only narrows `.sidebar-wrap`: `.sidebar-inner` keeps the open width (no reflow), rows and the search box shrink to 38px, and labels and the chat list fade. The title bar's mark, name and sidebar button never move; only the title travels with the pane.
+- Efforts: off, low, medium, high, xhigh ("Extra high"), max. There's no "auto" (old values read as medium: `normalize_effort`, `effortOf`). On a 400/422 an effort above high is retried as high before the optional fields are dropped; endpoints that reject them are remembered for the session (`plain_only`).
+- Settings pages are keyed by section and editor and only animate in: an `AnimatePresence mode="wait"` there left the page blank after leaving an editor.
+- The window sets its own icon (`window::install`), so the taskbar doesn't show an icon Explorer cached for the exe path.
+- Never send an empty assistant message to a model (`history_messages` skips them). Effort fields must stay in `OPTIONAL_FIELDS` (a test checks it).
+- `settings.send_reasoning` (on by default) puts each assistant message's thinking in `reasoning_content`: in history, per tool round (the thinking before a round's calls goes with them), and in the live tool loop. On a 400/422 `stream_chat` retries without it (after a lower effort, before dropping the optional fields) and remembers the endpoint (`no_reasoning`).
+- Providers: `show_all` off shows only `custom_models` (ticked in the editor, or typed). `providers_probe` (on start and each time the model picker opens, at most every 4 s) asks every server at once; unreachable ones, and models a server stopped listing, go to the picker's Offline section, and a changed list is saved.
+- Provider icons (`components/ProviderIcon.tsx`, `providers.icon`, schema v4): "brand:…" (one-color SVGs in `src/assets/providers/`, from LobeHub Icons, with their viewBox re-framed so the artwork sits optically centered: keep that if you add one), "lucide:…", or a `data:image` URL (`icon_from_file`, at most 256 KB). NULL means `autoIcon` (from the address or name). Presets set theirs. Anthropic's model list needs `x-api-key` + `anthropic-version` (`llm::request` adds them for api.anthropic.com).
+- Titles (`TitlePlan`): the title model from Settings (or the chat's) runs before the first reply when it's on the chat's server (`same_server`), from the message alone, so it can't evict the conversation from a single-slot cache; on another server it runs after, with the reply.
+- The window has a CSP (`tauri.conf.json`): no remote scripts, styles, images or connections; the UI talks to Rust over IPC only. `devCsp` is null for Vite.
+- With zustand v5, a selector that returns a new array or object needs `useShallow`.
+- PowerShell turns `$null` into `""` for string parameters (that's why `window-shot.ps1` finds the window by process).
+- Before a commit: `pnpm exec tsc --noEmit`, `cd src-tauri && cargo test`, `pnpm exec vite build`.
+
+## Testing the real app
+
+1. `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9333" pnpm dev:app` (in the background). It runs beside an installed Relay.
+2. `node scripts/dev/cdp.mjs eval|shot|click|type|key …`. Dev builds expose the store as `window.relay`; `window.__TAURI_INTERNALS__.invoke` reaches every command.
+3. `scripts/dev/shot.sh out.png` takes an in-page screenshot with a stand-in background (CDP can't capture acrylic). `scripts/dev/window-shot.ps1 -Out x.png` captures the real window, but only when it's in front.
+4. `scripts/dev/test-mcp.mjs` is a dependency-free MCP server (add, now, shout, fail): add it as `node <path>`.
+5. A local OpenAI-compatible server makes the best test; reasoning models exercise the thinking UI.
+6. A reply that finishes while the window isn't focused sends a real Holster notification (only from the installed identity).
+7. Afterwards: delete test chats, providers and servers, reset settings, and stop the dev task (only the `target\debug` process).

@@ -64,6 +64,13 @@ pub struct Provider {
     pub has_key: bool,
     #[serde(default)]
     pub sort: i64,
+    /// The protocol: "openai" (Chat Completions) or "anthropic" (Messages).
+    #[serde(default = "openai")]
+    pub api: String,
+}
+
+fn openai() -> String {
+    "openai".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,7 +176,10 @@ pub struct ChatSummary {
     pub preset_id: Option<String>,
     /// None: the default from settings.
     pub effort: Option<String>,
+    /// MCP tools (the column kept its first name, from when it covered skills too).
     pub tools: bool,
+    pub skills: bool,
+    pub web: bool,
     /// Out of the main list (in the sidebar's Archived group).
     pub archived: bool,
 }
@@ -274,6 +284,18 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
 );
 "#;
 
+/// v6: the provider's protocol, per-chat Skills and Web search switches (the
+/// old Tools switch covered skills, so they start as it was), and a reply's
+/// blocks as an Anthropic server sent them (thinking goes back signed).
+const SCHEMA_V6: &str = r#"
+ALTER TABLE providers ADD COLUMN api TEXT NOT NULL DEFAULT 'openai';
+UPDATE providers SET api = 'anthropic' WHERE base_url LIKE '%api.anthropic.com%';
+ALTER TABLE chats ADD COLUMN skills INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE chats ADD COLUMN web INTEGER NOT NULL DEFAULT 0;
+UPDATE chats SET skills = tools;
+ALTER TABLE messages ADD COLUMN native TEXT;
+"#;
+
 /// v5: files on messages, archived chats, and what each model takes
 /// (as detected, and as the user said).
 const SCHEMA_V5: &str = r#"
@@ -360,7 +382,7 @@ fn message_from(row: &Row) -> rusqlite::Result<Message> {
     })
 }
 
-const SUMMARY_COLS: &str = "id, title, provider_id, model, created_at, updated_at, pinned, preset_id, effort, tools, archived";
+const SUMMARY_COLS: &str = "id, title, provider_id, model, created_at, updated_at, pinned, preset_id, effort, tools, archived, skills, web";
 
 fn summary_from(row: &Row) -> rusqlite::Result<ChatSummary> {
     Ok(ChatSummary {
@@ -375,6 +397,8 @@ fn summary_from(row: &Row) -> rusqlite::Result<ChatSummary> {
         effort: row.get(8)?,
         tools: row.get::<_, i64>(9)? != 0,
         archived: row.get::<_, i64>(10)? != 0,
+        skills: row.get::<_, i64>(11)? != 0,
+        web: row.get::<_, i64>(12)? != 0,
     })
 }
 
@@ -408,6 +432,8 @@ pub struct ChatOptions {
     pub preset_id: Option<String>,
     pub effort: Option<String>,
     pub tools: Option<bool>,
+    pub skills: Option<bool>,
+    pub web: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -478,6 +504,9 @@ impl Db {
         if version < 5 {
             conn.execute_batch(&format!("BEGIN; {SCHEMA_V5} PRAGMA user_version = 5; COMMIT;"))?;
         }
+        if version < 6 {
+            conn.execute_batch(&format!("BEGIN; {SCHEMA_V6} PRAGMA user_version = 6; COMMIT;"))?;
+        }
         // A reply that was streaming when Relay closed will never finish.
         conn.execute("UPDATE messages SET status = 'stopped' WHERE status = 'streaming'", [])?;
         Ok(Self { conn: Mutex::new(conn) })
@@ -493,7 +522,7 @@ impl Db {
     pub fn providers(&self) -> Result<Vec<Provider>, String> {
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT id, name, base_url, models, models_at, custom_models, has_key, sort, contexts, show_all, icon, caps, caps_user
+                "SELECT id, name, base_url, models, models_at, custom_models, has_key, sort, contexts, show_all, icon, caps, caps_user, api
                  FROM providers ORDER BY sort, created_at",
             )?;
             let rows = st.query_map([], |r| {
@@ -511,6 +540,7 @@ impl Db {
                     icon: r.get(10)?,
                     caps: json_of(r.get(11)?),
                     caps_user: json_of(r.get(12)?),
+                    api: r.get(13)?,
                 })
             })?;
             rows.collect()
@@ -524,11 +554,11 @@ impl Db {
     pub fn save_provider(&self, p: &Provider) -> Result<(), String> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO providers (id, name, base_url, models, models_at, custom_models, has_key, sort, created_at, contexts, show_all, icon, caps, caps_user)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                "INSERT INTO providers (id, name, base_url, models, models_at, custom_models, has_key, sort, created_at, contexts, show_all, icon, caps, caps_user, api)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                  ON CONFLICT(id) DO UPDATE SET name = ?2, base_url = ?3, models = ?4, models_at = ?5,
                     custom_models = ?6, has_key = ?7, sort = ?8, contexts = ?10, show_all = ?11, icon = ?12,
-                    caps = ?13, caps_user = ?14",
+                    caps = ?13, caps_user = ?14, api = ?15",
                 params![
                     p.id,
                     p.name,
@@ -543,7 +573,8 @@ impl Db {
                     p.show_all as i64,
                     p.icon,
                     text_of(&p.caps),
-                    text_of(&p.caps_user)
+                    text_of(&p.caps_user),
+                    p.api
                 ],
             )?;
             Ok(())
@@ -685,7 +716,8 @@ impl Db {
             c.query_row(
                 &format!("SELECT {SUMMARY_COLS}, system_prompt, leaf_id FROM chats WHERE id = ?1"),
                 [id],
-                |r| Ok((summary_from(r)?, r.get::<_, String>(11)?, r.get::<_, Option<String>>(12)?)),
+                // Right after the summary's columns.
+                |r| Ok((summary_from(r)?, r.get::<_, String>(13)?, r.get::<_, Option<String>>(14)?)),
             )
             .optional()
         })?;
@@ -753,9 +785,19 @@ impl Db {
         let now = now_ms();
         self.with(|c| {
             c.execute(
-                "INSERT INTO chats (id, provider_id, model, preset_id, effort, tools, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
-                params![id, provider_id, model, opts.preset_id, opts.effort, opts.tools.unwrap_or(true) as i64, now],
+                "INSERT INTO chats (id, provider_id, model, preset_id, effort, tools, skills, web, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                params![
+                    id,
+                    provider_id,
+                    model,
+                    opts.preset_id,
+                    opts.effort,
+                    opts.tools.unwrap_or(true) as i64,
+                    opts.skills.unwrap_or(true) as i64,
+                    opts.web.unwrap_or(false) as i64,
+                    now
+                ],
             )?;
             Ok(())
         })?;
@@ -774,6 +816,12 @@ impl Db {
             }
             if let Some(t) = opts.tools {
                 c.execute("UPDATE chats SET tools = ?2 WHERE id = ?1", params![id, t as i64])?;
+            }
+            if let Some(t) = opts.skills {
+                c.execute("UPDATE chats SET skills = ?2 WHERE id = ?1", params![id, t as i64])?;
+            }
+            if let Some(t) = opts.web {
+                c.execute("UPDATE chats SET web = ?2 WHERE id = ?1", params![id, t as i64])?;
             }
             Ok(())
         })
@@ -908,6 +956,28 @@ impl Db {
             }
             c.execute("UPDATE chats SET updated_at = ?2 WHERE id = ?1", params![chat_id, now_ms()])?;
             Ok(())
+        })
+    }
+
+    /// A reply's blocks as an Anthropic server sent them, one list per round
+    /// (with the model that wrote them), so the next request can send them
+    /// back unchanged: thinking only counts with its signature.
+    pub fn set_native(&self, id: &str, native: &Value) -> Result<(), String> {
+        self.with(|c| c.execute("UPDATE messages SET native = ?2 WHERE id = ?1", params![id, native.to_string()]).map(|_| ()))
+    }
+
+    pub fn natives(&self, ids: &[String]) -> Result<HashMap<String, Value>, String> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT native FROM messages WHERE id = ?1 AND native IS NOT NULL")?;
+            let mut out = HashMap::new();
+            for id in ids {
+                if let Some(text) = st.query_row([id], |r| r.get::<_, String>(0)).optional()? {
+                    if let Ok(v) = serde_json::from_str(&text) {
+                        out.insert(id.clone(), v);
+                    }
+                }
+            }
+            Ok(out)
         })
     }
 
@@ -1144,7 +1214,7 @@ mod tests {
         let db = Db::init(conn).unwrap();
         let chat = db.chat("c").unwrap().unwrap();
         assert_eq!(chat.summary.title, "Old");
-        assert!(chat.summary.tools && chat.summary.effort.is_none());
+        assert!(chat.summary.tools && chat.summary.skills && !chat.summary.web && chat.summary.effort.is_none());
         assert_eq!(chat.messages[0].content, "hi");
         assert!(db.provider("p").unwrap().unwrap().contexts.is_empty());
         assert!(db.presets().unwrap().is_empty());

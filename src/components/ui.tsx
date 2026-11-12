@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { Check, ChevronDown, Minus, Plus } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, Minus, Plus } from "lucide-react";
 import { forwardRef, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { spring } from "../lib/motion";
@@ -57,6 +57,8 @@ export function Popover({
   width,
   className,
   trigger,
+  onPointerEnter,
+  onPointerLeave,
 }: {
   anchor: Anchor | null;
   onClose: () => void;
@@ -65,6 +67,8 @@ export function Popover({
   className?: string;
   /** The button that opens it: a press there toggles instead of closing and reopening. */
   trigger?: React.RefObject<Element | null>;
+  onPointerEnter?: () => void;
+  onPointerLeave?: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
@@ -130,6 +134,8 @@ export function Popover({
           exit={{ opacity: 0, scale: 0.97, y: anchor.above ? 2 : -2, transition: { duration: 0.12 } }}
           transition={spring}
           onContextMenu={(e) => e.preventDefault()}
+          onPointerEnter={onPointerEnter}
+          onPointerLeave={onPointerLeave}
         >
           {children}
         </motion.div>
@@ -163,6 +169,111 @@ export function MenuItem({
       {trailing && <span className="menu-hint">{trailing}</span>}
       {checked && <Check size={14} className="menu-check" />}
     </button>
+  );
+}
+
+/** How long the pointer may be off a submenu and its row before it closes
+ *  (crossing the gap between them, or cutting a corner). */
+const SUBMENU_GRACE = 220;
+
+/** A menu row with a side menu that opens while the pointer is on the row
+ *  (or with the keyboard: Enter, Space or the right arrow). A click on the row
+ *  does nothing: the menu is already open by then. It opens to the right, or
+ *  to the left when there's no room. `children` gets `close` for a choice. */
+export function SubmenuItem({
+  icon,
+  label,
+  value,
+  width = 220,
+  children,
+}: {
+  icon?: React.ReactNode;
+  label: string;
+  /** The current choice, shown at the row's end. */
+  value?: React.ReactNode;
+  width?: number;
+  children: (close: () => void) => React.ReactNode;
+}) {
+  const row = useRef<HTMLDivElement>(null);
+  const [anchor, setAnchor] = useState<Anchor | null>(null);
+  const timer = useRef<number | undefined>(undefined);
+  const stay = () => window.clearTimeout(timer.current);
+  const leave = () => {
+    stay();
+    timer.current = window.setTimeout(() => setAnchor(null), SUBMENU_GRACE);
+  };
+  const close = useCallback(() => {
+    window.clearTimeout(timer.current);
+    setAnchor(null);
+  }, []);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const open = () => {
+    stay();
+    if (anchor || !row.current) return;
+    const r = row.current.getBoundingClientRect();
+    const right = r.right + 6 + width <= window.innerWidth - 8;
+    // The menu's padding (5px) lines its first or last row up with this one.
+    const above = r.top > window.innerHeight / 2;
+    setAnchor({
+      x: Math.round(right ? r.right + 6 : r.left - 6),
+      y: Math.round(above ? r.bottom + 6 : r.top - 6),
+      alignRight: !right,
+      above,
+    });
+  };
+  return (
+    <>
+      <div
+        ref={row}
+        role="menuitem"
+        aria-haspopup="menu"
+        aria-expanded={!!anchor}
+        tabIndex={0}
+        className={`menu-item submenu-row ${anchor ? "open" : ""}`}
+        onPointerEnter={open}
+        onPointerLeave={leave}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " " || e.key === "ArrowRight") {
+            e.preventDefault();
+            open();
+          }
+        }}
+      >
+        {icon !== undefined && <span className="menu-icon">{icon}</span>}
+        <span className="menu-label">{label}</span>
+        {value !== undefined && <span className="menu-hint submenu-value">{value}</span>}
+        <ChevronRight size={14} className="submenu-chev" />
+      </div>
+      <Popover anchor={anchor} onClose={close} width={width} trigger={row} onPointerEnter={stay} onPointerLeave={leave}>
+        <div className="menu">{children(close)}</div>
+      </Popover>
+    </>
+  );
+}
+
+/** A menu row that flips a switch: the whole row is the control. */
+export function SwitchItem({ icon, label, on, onChange, hint }: { icon?: React.ReactNode; label: string; on: boolean; onChange: (on: boolean) => void; hint?: string }) {
+  return (
+    <div
+      role="switch"
+      aria-checked={on}
+      tabIndex={0}
+      title={hint}
+      className="menu-item switch-row"
+      onClick={() => onChange(!on)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onChange(!on);
+        }
+      }}
+    >
+      {icon !== undefined && <span className="menu-icon">{icon}</span>}
+      <span className="menu-label">{label}</span>
+      <span className={`toggle small ${on ? "on" : ""}`} aria-hidden>
+        <motion.span className="toggle-knob" layout transition={spring} />
+      </span>
+    </div>
   );
 }
 

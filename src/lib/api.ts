@@ -50,6 +50,12 @@ export interface Settings {
   disabledSkills: string[];
   /** Skills whose scripts run without asking. */
   skillScripts: string[];
+  /** How long Anthropic keeps a conversation's prompt cache. */
+  anthropicCache: "5m" | "1h";
+  /** The switches a new chat starts with: the last ones used. */
+  chatSkills: boolean;
+  chatMcp: boolean;
+  chatWeb: boolean;
 }
 
 /** A skill: a folder with SKILL.md (and maybe more files). */
@@ -89,7 +95,11 @@ export interface Provider {
   contexts: Record<string, number>;
   hasKey: boolean;
   sort: number;
+  /** The protocol the server speaks. */
+  api: ProviderApi;
 }
+
+export type ProviderApi = "openai" | "anthropic";
 
 /** Whether a provider answered just now, and what it lists (null: it doesn't list models). */
 export interface ProviderStatus {
@@ -155,7 +165,10 @@ export interface ChatSummary {
   pinned: boolean;
   presetId: string | null;
   effort: Effort | null;
+  /** MCP tools. */
   tools: boolean;
+  skills: boolean;
+  web: boolean;
   /** In the sidebar's Archived group. */
   archived: boolean;
 }
@@ -261,7 +274,10 @@ export interface Chat extends ChatSummary {
 export interface ChatOptions {
   presetId?: string | null;
   effort?: Effort | null;
+  /** MCP tools. */
   tools?: boolean;
+  skills?: boolean;
+  web?: boolean;
 }
 
 export interface SearchHit {
@@ -306,6 +322,7 @@ export interface ProviderInput {
   showAll?: boolean;
   /** undefined keeps the icon; "" goes back to automatic. */
   icon?: string;
+  api?: ProviderApi;
 }
 
 export interface ModelUsage {
@@ -345,7 +362,7 @@ export const api = {
   providers: () => invoke<Provider[]>("providers_list"),
   saveProvider: (input: ProviderInput) => invoke<Provider>("provider_save", { input }),
   deleteProvider: (id: string) => invoke<void>("provider_delete", { id }),
-  testProvider: (baseUrl: string, key?: string, id?: string) => invoke<string[]>("provider_test", { baseUrl, key, id }),
+  testProvider: (baseUrl: string, key?: string, id?: string, kind?: ProviderApi) => invoke<string[]>("provider_test", { baseUrl, key, id, kind }),
   refreshProvider: (id: string) => invoke<Provider>("provider_refresh", { id }),
   modelContext: (providerId: string, model: string) => invoke<number | null>("model_context", { providerId, model }),
   modelCaps: (providerId: string, model: string) => invoke<ModelCaps | null>("model_caps", { providerId, model }),

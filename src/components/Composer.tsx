@@ -1,14 +1,13 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { AnimatePresence, motion } from "framer-motion";
-import { BookMarked, Brain, ChevronDown, Mic, Paperclip, Settings2, Square, Wrench, type LucideIcon } from "lucide-react";
+import { BookMarked, Globe, Mic, Paperclip, Plug, Plus, SlidersHorizontal, Square } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { EFFORTS, effortOf } from "../lib/api";
 import { clock, micError, record, type Recording } from "../lib/media";
 import { spring } from "../lib/motion";
 import { compact, useActiveModel, useChatOptions, useEscape, useStore, type DraftFile } from "../lib/store";
 import { AttachmentTray } from "./Attachments";
-import { ModelPicker } from "./ModelPicker";
-import { MenuItem, MenuLabel, MenuSeparator, Popover, Toggle, anchorFrom, type Anchor, Dot } from "./ui";
+import { ModelEffortPicker } from "./ModelPicker";
+import { MenuItem, MenuSeparator, Popover, SubmenuItem, SwitchItem, anchorFrom, type Anchor } from "./ui";
 
 /** Drafts survive switching chats (per chat, for this session). */
 const drafts = new Map<string, string>();
@@ -99,12 +98,9 @@ export function Composer({ chatId, streaming }: { chatId: string | null; streami
         }}
       />
       <div className="composer-bar">
-        <AttachButton />
-        <ModelPicker value={model} />
-        <EffortChip />
-        <PresetChip />
-        <ToolsChip />
+        <PlusMenu />
         <div className="composer-fill" />
+        <ModelEffortPicker value={model} />
         <ContextMeter />
         {!!navigator.mediaDevices && <MicButton recording={recording} onStart={() => setRecording(true)} />}
         {streaming ? (
@@ -167,23 +163,6 @@ function SendGlyph({ kind }: { kind: "send" | "stop" }) {
         <rect x="11" y="11" width="10" height="10" rx="1.5" fill="currentColor" />
       )}
     </svg>
-  );
-}
-
-function AttachButton() {
-  return (
-    <button
-      className="bar-btn"
-      aria-label="Attach files"
-      title="Attach files (or drop or paste them)"
-      onClick={async () => {
-        const picked = await open({ multiple: true, title: "Attach files" });
-        if (!picked) return;
-        void useStore.getState().attach({ paths: Array.isArray(picked) ? picked : [picked] });
-      }}
-    >
-      <Paperclip size={16} />
-    </button>
   );
 }
 
@@ -295,173 +274,86 @@ export function wantsSend(e: React.KeyboardEvent, sendKey: string): boolean {
   return e.ctrlKey;
 }
 
-/** A chip in the composer bar that opens a small menu. */
-function Chip({
-  icon: Icon,
-  label,
-  title,
-  muted,
-  children,
-  width = 260,
-}: {
-  icon: LucideIcon;
-  label: string;
-  title: string;
-  muted?: boolean;
-  children: (close: () => void) => React.ReactNode;
-  width?: number;
-}) {
+/** The "+" menu: files, the preset, and the chat's switches (skills, MCP
+ *  tools, web search). */
+function PlusMenu() {
   const [anchor, setAnchor] = useState<Anchor | null>(null);
   const btn = useRef<HTMLButtonElement>(null);
   const close = () => setAnchor(null);
-  return (
-    <>
-      <button ref={btn} className={`chip ${anchor ? "open" : ""} ${muted ? "muted" : ""}`} title={title} onClick={() => (anchor ? close() : setAnchor(anchorFrom(btn.current!, { above: true })))}>
-        <Icon size={14} className="chip-icon" />
-        <span className="chip-label">{label}</span>
-        <ChevronDown size={13} className="chip-caret" />
-      </button>
-      <Popover anchor={anchor} onClose={close} width={width} trigger={btn}>
-        <div className="menu">{children(close)}</div>
-      </Popover>
-    </>
-  );
-}
-
-function EffortChip() {
-  const opts = useChatOptions();
-  const defaultEffort = useStore((s) => s.settings?.defaultEffort);
-  const presets = useStore((s) => s.presets);
-  const presetEffort = presets.find((p) => p.id === opts.presetId)?.effort ?? null;
-  const effective = effortOf(opts.effort ?? presetEffort ?? defaultEffort);
-  const label = EFFORTS.find((e) => e.value === effective)?.label ?? "Medium";
-  return (
-    <Chip icon={Brain} label={label} title="How hard the model thinks">
-      {(close) => (
-        <>
-          <MenuLabel>Thinking effort</MenuLabel>
-          {EFFORTS.map((e) => (
-            <MenuItem
-              key={e.value}
-              checked={effective === e.value}
-              onSelect={() => {
-                close();
-                useStore.getState().setOptions({ effort: e.value });
-              }}
-            >
-              <span className="menu-two">
-                <span>{e.label}</span>
-                <span className="menu-sub">{e.hint}</span>
-              </span>
-            </MenuItem>
-          ))}
-          <MenuSeparator />
-          <div className="menu-note">Servers that can't change it simply ignore it.</div>
-        </>
-      )}
-    </Chip>
-  );
-}
-
-function PresetChip() {
   const opts = useChatOptions();
   const presets = useStore((s) => s.presets);
   const preset = presets.find((p) => p.id === opts.presetId);
+  const set = useStore((s) => s.setOptions);
   return (
-    <Chip icon={Settings2} label={preset?.name ?? "Preset"} title="The system prompt and settings for this chat" muted={!preset}>
-      {(close) => (
-        <>
-          <MenuLabel>Preset</MenuLabel>
+    <>
+      <button
+        ref={btn}
+        className={`bar-btn ${anchor ? "open" : ""}`}
+        aria-label="Add files, preset and tools"
+        title="Add files, preset and tools"
+        onClick={() => (anchor ? close() : setAnchor(anchorFrom(btn.current!, { above: true })))}
+      >
+        <Plus size={18} />
+      </button>
+      <Popover anchor={anchor} onClose={close} width={232} trigger={btn}>
+        <div className="menu">
           <MenuItem
-            checked={!preset}
-            onSelect={() => {
+            icon={<Paperclip size={15} />}
+            onSelect={async () => {
               close();
-              useStore.getState().setOptions({ presetId: null });
+              const picked = await open({ multiple: true, title: "Add files" });
+              if (!picked) return;
+              void useStore.getState().attach({ paths: Array.isArray(picked) ? picked : [picked] });
             }}
           >
-            None
+            Add files
           </MenuItem>
-          {presets.map((p) => (
-            <MenuItem
-              key={p.id}
-              checked={p.id === preset?.id}
-              onSelect={() => {
-                close();
-                useStore.getState().setOptions({ presetId: p.id });
-              }}
-            >
-              {p.name}
-            </MenuItem>
-          ))}
+          <SubmenuItem icon={<SlidersHorizontal size={15} />} label="Preset" value={preset?.name ?? "None"} width={220}>
+            {(done) => (
+              <>
+                <MenuItem
+                  checked={!preset}
+                  onSelect={() => {
+                    done();
+                    close();
+                    set({ presetId: null });
+                  }}
+                >
+                  None
+                </MenuItem>
+                {presets.map((p) => (
+                  <MenuItem
+                    key={p.id}
+                    checked={p.id === preset?.id}
+                    onSelect={() => {
+                      done();
+                      close();
+                      set({ presetId: p.id });
+                    }}
+                  >
+                    {p.name}
+                  </MenuItem>
+                ))}
+                <MenuSeparator />
+                <MenuItem
+                  onSelect={() => {
+                    done();
+                    close();
+                    useStore.getState().openSettings("presets", presets.length ? null : "new");
+                  }}
+                >
+                  {presets.length ? "Manage presets…" : "Create a preset…"}
+                </MenuItem>
+              </>
+            )}
+          </SubmenuItem>
           <MenuSeparator />
-          <MenuItem
-            onSelect={() => {
-              close();
-              useStore.getState().openSettings("presets", presets.length ? null : "new");
-            }}
-          >
-            {presets.length ? "Manage presets…" : "Create a preset…"}
-          </MenuItem>
-        </>
-      )}
-    </Chip>
-  );
-}
-
-function ToolsChip() {
-  const opts = useChatOptions();
-  const servers = useStore((s) => s.mcp);
-  const allSkills = useStore((s) => s.skills);
-  if (!servers.length && !allSkills.length) return null;
-  const skills = allSkills.filter((s) => s.enabled && !s.error).length;
-  const ready = servers.filter((s) => s.enabled && s.status.state === "ready");
-  const count = ready.reduce((n, s) => n + s.status.tools.filter((t) => (s.toolPolicy[t.name] ?? s.defaultPolicy) !== "off").length, 0);
-  const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
-  const label = !opts.tools ? "Tools off" : [count ? plural(count, "tool") : "", skills ? plural(skills, "skill") : ""].filter(Boolean).join(" · ") || "Tools";
-  return (
-    <Chip icon={Wrench} label={label} title="Tools and skills the model may use" muted={!opts.tools || (!count && !skills)} width={280}>
-      {(close) => (
-        <>
-          <div className="menu-toggle-row">
-            <span>Use tools in this chat</span>
-            <Toggle label="Use tools in this chat" on={opts.tools} onChange={(tools) => useStore.getState().setOptions({ tools })} />
-          </div>
-          {allSkills.length > 0 && (
-            <>
-              <MenuSeparator />
-              <MenuItem
-                icon={<BookMarked size={15} />}
-                trailing={skills ? `${skills} on` : "All off"}
-                onSelect={() => {
-                  close();
-                  useStore.getState().openSettings("skills");
-                }}
-              >
-                Skills
-              </MenuItem>
-            </>
-          )}
-          {servers.length > 0 && <MenuSeparator />}
-          {servers.length > 0 && <MenuLabel>Servers</MenuLabel>}
-          {servers.map((s) => (
-            <div key={s.id} className="menu-server">
-              <Dot state={!s.enabled ? "off" : s.status.state === "ready" ? "ok" : s.status.state === "connecting" ? "busy" : s.status.state === "error" ? "error" : "off"} />
-              <span className="menu-server-name">{s.name}</span>
-              <span className="menu-sub">{!s.enabled ? "Off" : s.status.state === "ready" ? `${s.status.tools.length} tools` : s.status.state === "connecting" ? "Connecting" : "Not connected"}</span>
-            </div>
-          ))}
-          <MenuSeparator />
-          <MenuItem
-            onSelect={() => {
-              close();
-              useStore.getState().openSettings("tools");
-            }}
-          >
-            Manage tools…
-          </MenuItem>
-        </>
-      )}
-    </Chip>
+          <SwitchItem icon={<BookMarked size={15} />} label="Skills" on={opts.skills} onChange={(skills) => set({ skills })} hint="The skills you turned on in Settings" />
+          <SwitchItem icon={<Plug size={15} />} label="MCPs" on={opts.tools} onChange={(tools) => set({ tools })} hint="Tools from your MCP servers" />
+          <SwitchItem icon={<Globe size={15} />} label="Web search" on={opts.web} onChange={(web) => set({ web })} hint="Search the web and read pages" />
+        </div>
+      </Popover>
+    </>
   );
 }
 

@@ -150,6 +150,8 @@ pub struct ProviderInput {
     show_all: Option<bool>,
     /// None leaves the icon alone; "" goes back to the one chosen from the address.
     icon: Option<String>,
+    /// "openai" or "anthropic". None: unchanged (new providers pick by address).
+    api: Option<String>,
 }
 
 #[tauri::command]
@@ -181,7 +183,14 @@ pub fn provider_save(core: CoreState, input: ProviderInput) -> Result<Provider, 
         caps_user: HashMap::new(),
         has_key: false,
         sort,
+        api: if base_url.contains("api.anthropic.com") { "anthropic".into() } else { "openai".into() },
     });
+    if let Some(api) = input.api.as_deref() {
+        if api != "openai" && api != "anthropic" {
+            return Err(format!("Unknown API \"{api}\""));
+        }
+        p.api = api.to_string();
+    }
     if let Some(all) = input.show_all {
         p.show_all = all;
     }

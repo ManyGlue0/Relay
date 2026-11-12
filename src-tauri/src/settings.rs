@@ -57,6 +57,12 @@ pub struct Settings {
     pub disabled_skills: Vec<String>,
     /// Skills whose scripts run without asking.
     pub skill_scripts: Vec<String>,
+    /// How long Anthropic keeps a conversation's prompt cache: "5m" or "1h".
+    pub anthropic_cache: String,
+    /// The switches a new chat starts with: the last ones used.
+    pub chat_skills: bool,
+    pub chat_mcp: bool,
+    pub chat_web: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -143,6 +149,10 @@ impl Default for Settings {
             sidebar_open: true,
             disabled_skills: Vec::new(),
             skill_scripts: Vec::new(),
+            anthropic_cache: "5m".into(),
+            chat_skills: true,
+            chat_mcp: true,
+            chat_web: false,
         }
     }
 }

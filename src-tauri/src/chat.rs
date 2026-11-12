@@ -501,7 +501,9 @@ struct ToolRoute {
 
 /// The tools a reply may use: the built-in skill tools first (when there are
 /// skills), then every tool of the ready MCP servers that isn't off.
-fn tool_specs(core: &Core, skills: &[Skill]) -> (Vec<Value>, HashMap<String, ToolRoute>) {
+/// The tools a chat offers, in a fixed order (skills, then MCP servers in
+/// their Settings order): each switch adds its own.
+fn tool_specs(core: &Core, skills: &[Skill], mcp: bool) -> (Vec<Value>, HashMap<String, ToolRoute>) {
     let mut specs = Vec::new();
     let mut routes = HashMap::new();
     if !skills.is_empty() {
@@ -521,7 +523,8 @@ fn tool_specs(core: &Core, skills: &[Skill]) -> (Vec<Value>, HashMap<String, Too
     }
     // In the servers' order from Settings, so the tool list is the same every
     // time (a changed list would spoil the server's prompt cache).
-    for server in core.db.mcp_servers().unwrap_or_default() {
+    let servers = if mcp { core.db.mcp_servers().unwrap_or_default() } else { Vec::new() };
+    for server in servers {
         if !server.enabled {
             continue;
         }
@@ -565,8 +568,8 @@ pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &s
         .clone()
         .or_else(|| preset.as_ref().and_then(|p| p.effort.clone()))
         .unwrap_or_else(|| settings.default_effort.clone());
-    let skills = if chat.summary.tools { skills::usable(&core) } else { Vec::new() };
-    let (specs, routes) = if chat.summary.tools { tool_specs(&core, &skills) } else { (Vec::new(), HashMap::new()) };
+    let skills = if chat.summary.skills { skills::usable(&core) } else { Vec::new() };
+    let (specs, routes) = tool_specs(&core, &skills, chat.summary.tools);
 
     let mut messages: Vec<Value> = Vec::new();
     let mut system = system_prompt(&core, preset.as_ref(), &chat.system_prompt);

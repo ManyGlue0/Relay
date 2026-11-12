@@ -195,7 +195,7 @@ export const useStore = create<State>((set, get) => ({
       mcp,
       skills,
       chats,
-      draftOptions: { presetId: settings.defaultPreset },
+      draftOptions: draftFrom(settings),
       streaming: Object.fromEntries(streaming.map((id) => [id, true] as const)),
       loaded: true,
     });
@@ -249,7 +249,7 @@ export const useStore = create<State>((set, get) => ({
       currentId: null,
       current: null,
       draftModel: null,
-      draftOptions: { presetId: s.settings?.defaultPreset ?? null },
+      draftOptions: s.settings ? draftFrom(s.settings) : {},
       settingsOpen: false,
       focusComposer: s.focusComposer + 1,
     });
@@ -499,6 +499,12 @@ export const useStore = create<State>((set, get) => ({
 
   setOptions(opts) {
     const st = get();
+    // A new chat starts with the switches used last.
+    const last: Partial<Settings> = {};
+    if (opts.skills !== undefined) last.chatSkills = opts.skills;
+    if (opts.tools !== undefined) last.chatMcp = opts.tools;
+    if (opts.web !== undefined) last.chatWeb = opts.web;
+    if (Object.keys(last).length) void api.updateSettings(last).then((settings) => set({ settings }));
     if (!st.current) {
       set((s) => ({ draftOptions: { ...s.draftOptions, ...opts } }));
       return;
@@ -509,6 +515,8 @@ export const useStore = create<State>((set, get) => ({
       presetId: opts.presetId === null ? "" : opts.presetId,
       effort: opts.effort === null ? ("" as Effort) : opts.effort,
       tools: opts.tools,
+      skills: opts.skills,
+      web: opts.web,
     };
     set((s) => ({ current: s.current ? { ...s.current, ...opts } : null }));
     void api
@@ -710,11 +718,16 @@ export function useActiveModel(): ModelRef | null {
 }
 
 /** The options the composer shows: the chat's, or the draft's. */
-export function useChatOptions(): { presetId: string | null; effort: Effort | null; tools: boolean } {
+/** A new chat's options: the default preset and the switches used last. */
+function draftFrom(settings: Settings): ChatOptions {
+  return { presetId: settings.defaultPreset, tools: settings.chatMcp, skills: settings.chatSkills, web: settings.chatWeb };
+}
+
+export function useChatOptions(): { presetId: string | null; effort: Effort | null; tools: boolean; skills: boolean; web: boolean } {
   const current = useStore((s) => s.current);
   const draft = useStore((s) => s.draftOptions);
-  if (current) return { presetId: current.presetId, effort: current.effort, tools: current.tools };
-  return { presetId: draft.presetId ?? null, effort: draft.effort ?? null, tools: draft.tools ?? true };
+  if (current) return { presetId: current.presetId, effort: current.effort, tools: current.tools, skills: current.skills, web: current.web };
+  return { presetId: draft.presetId ?? null, effort: draft.effort ?? null, tools: draft.tools ?? true, skills: draft.skills ?? true, web: draft.web ?? false };
 }
 
 /** "qwen3:8b" from "library/qwen3:8b"; ids without a path stay as they are. */

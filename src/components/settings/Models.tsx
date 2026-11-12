@@ -1,10 +1,10 @@
 import { AudioLines, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, Eye, EyeOff, FileText, Film, Image, KeyRound, Loader, Plug, Plus, Search, Trash2, X, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
-import { api, EFFORTS, effortOf, errorText, type Ability, type Provider } from "../../lib/api";
+import { api, EFFORTS, effortOf, errorText, type Ability, type Provider, type ProviderApi } from "../../lib/api";
 import { compact, providerModels, shortModel, useStore } from "../../lib/store";
 import { ModelPicker } from "../ModelPicker";
 import { IconGlyph, IconPicker, ProviderIcon, autoIcon, iconOf } from "../ProviderIcon";
-import { Button, Empty, Select, Toggle } from "../ui";
+import { Button, Empty, Segmented, Select, Toggle } from "../ui";
 import { ConfirmButton, Field, Group, NumberInput, Page, Row } from "./kit";
 
 export function Models() {
@@ -90,13 +90,13 @@ function ModelsHome() {
   );
 }
 
-const PRESETS: { name: string; url: string; icon: string }[] = [
+const PRESETS: { name: string; url: string; icon: string; api?: ProviderApi }[] = [
   { name: "Ollama", url: "http://localhost:11434/v1", icon: "brand:ollama" },
   { name: "LM Studio", url: "http://localhost:1234/v1", icon: "brand:lmstudio" },
   { name: "llama.cpp", url: "http://localhost:8080/v1", icon: "lucide:cpu" },
   { name: "vLLM", url: "http://localhost:8000/v1", icon: "brand:vllm" },
   { name: "OpenAI", url: "https://api.openai.com/v1", icon: "brand:openai" },
-  { name: "Anthropic", url: "https://api.anthropic.com/v1", icon: "brand:anthropic" },
+  { name: "Anthropic", url: "https://api.anthropic.com/v1", icon: "brand:anthropic", api: "anthropic" },
   { name: "SpaceXSI", url: "https://api.x.ai/v1", icon: "brand:grok" },
   { name: "OpenRouter", url: "https://openrouter.ai/api/v1", icon: "brand:openrouter" },
 ];
@@ -111,6 +111,7 @@ function ProviderEditor({ provider }: { provider: Provider | null }) {
   const [showKey, setShowKey] = useState(false);
   const [custom, setCustom] = useState<string[]>(provider?.customModels ?? []);
   const [showAll, setShowAll] = useState(provider?.showAll ?? true);
+  const [apiKind, setApiKind] = useState<ProviderApi>(provider?.api ?? "openai");
   // null: automatic (from the address); undefined in the save means "unchanged".
   const [icon, setIcon] = useState<string | null>(provider?.icon ?? null);
   const [find, setFind] = useState("");
@@ -127,7 +128,7 @@ function ProviderEditor({ provider }: { provider: Provider | null }) {
     if (!url.trim()) return null;
     setTest({ state: "busy" });
     try {
-      const found = await api.testProvider(url, keyArg || undefined, keyTouched ? undefined : provider?.id);
+      const found = await api.testProvider(url, keyArg || undefined, keyTouched ? undefined : provider?.id, apiKind);
       setTest({ state: "ok", models: found });
       return found;
     } catch (e) {
@@ -143,7 +144,7 @@ function ProviderEditor({ provider }: { provider: Provider | null }) {
       // Context windows: what's set here wins; an empty box means "detect".
       const ctx: Record<string, number> = {};
       for (const m of allModels) ctx[m] = contexts[m] ?? 0;
-      const p = await api.saveProvider({ id: provider?.id, name, baseUrl: url, customModels: custom, showAll, icon: icon ?? "", key: keyArg, models: found ?? undefined, contexts: ctx });
+      const p = await api.saveProvider({ id: provider?.id, name, baseUrl: url, customModels: custom, showAll, icon: icon ?? "", api: apiKind, key: keyArg, models: found ?? undefined, contexts: ctx });
       await useStore.getState().refreshProviders();
       useStore.setState({ contexts: {} });
       if (!found && !custom.length) {
@@ -185,6 +186,7 @@ function ProviderEditor({ provider }: { provider: Provider | null }) {
                   setName(p.name);
                   setUrl(p.url);
                   setIcon(p.icon);
+                  setApiKind(p.api ?? "openai");
                   setTest({ state: "idle" });
                 }}
               >
@@ -205,7 +207,21 @@ function ProviderEditor({ provider }: { provider: Provider | null }) {
               <input className="input" value={name} placeholder="My server" aria-label="Name" onChange={(e) => setName(e.target.value)} />
             </div>
           </div>
-          <Field label="Address" hint="The OpenAI-compatible base address, usually ending in /v1">
+          <Field label="API" hint={apiKind === "anthropic" ? "Anthropic's Messages API: Claude's thinking, prompt caching and web search work fully" : "The Chat Completions API most servers speak"}>
+            <Segmented
+              id="provider-api"
+              value={apiKind}
+              options={[
+                { value: "openai", label: "OpenAI-compatible" },
+                { value: "anthropic", label: "Anthropic" },
+              ]}
+              onChange={(v) => {
+                setApiKind(v);
+                setTest({ state: "idle" });
+              }}
+            />
+          </Field>
+          <Field label="Address" hint="The base address, usually ending in /v1">
             <input
               className="input"
               value={url}

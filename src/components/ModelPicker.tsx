@@ -1,27 +1,30 @@
 import { motion } from "framer-motion";
 import { Box, Check, ChevronDown, ChevronRight, RefreshCw, Search, Settings2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, errorText, type ModelRef, type Provider } from "../lib/api";
+import { EFFORTS, api, effortOf, errorText, type ModelRef, type Provider } from "../lib/api";
 import { spring } from "../lib/motion";
-import { isOffline, providerModels, shortModel, useStore } from "../lib/store";
+import { isOffline, providerModels, shortModel, useChatOptions, useStore } from "../lib/store";
 import { IconGlyph, iconOf } from "./ProviderIcon";
-import { Popover, anchorFrom, type Anchor } from "./ui";
+import { MenuItem, Popover, SubmenuItem, anchorFrom, type Anchor } from "./ui";
 
 /** The list of every provider's models, with a filter and arrow keys. Models
  *  that can't answer right now (their server is down, or stopped listing
  *  them) wait in one folded "Offline" section at the end. Used by the
  *  composer chip, "Try again with…" and the title model setting. `top` goes
- *  above the list (an extra choice). */
+ *  above the list (an extra choice). `footer` replaces "Manage models…",
+ *  which then becomes a gear in the search row. */
 export function ModelMenu({
   value,
   onPick,
   onClose,
   top,
+  footer,
 }: {
   value: ModelRef | null;
   onPick: (ref: ModelRef) => void;
   onClose: () => void;
   top?: React.ReactNode;
+  footer?: React.ReactNode;
 }) {
   const providers = useStore((s) => s.providers);
   const online = useStore((s) => s.online);
@@ -88,6 +91,11 @@ export function ModelMenu({
     }
   };
 
+  const manage = () => {
+    onClose();
+    useStore.getState().openSettings("models");
+  };
+
   let index = -1;
   return (
     <>
@@ -111,6 +119,11 @@ export function ModelMenu({
             }
           }}
         />
+        {footer && (
+          <button className="model-manage" aria-label="Manage models" title="Manage models" onClick={manage}>
+            <Settings2 size={14} />
+          </button>
+        )}
       </div>
       <div className="model-list" ref={list}>
         {top}
@@ -184,18 +197,76 @@ export function ModelMenu({
         {groups.length === 0 && offline.length === 0 && <div className="model-none">Nothing matches “{filter}”</div>}
       </div>
       <div className="menu-sep" />
+      {footer ?? (
+        <button className="menu-item" onClick={manage}>
+          <span className="menu-icon">
+            <Settings2 size={15} />
+          </span>
+          <span className="menu-label">Manage models…</span>
+        </button>
+      )}
+    </>
+  );
+}
+
+/** The composer's model chip: the model and its thinking effort in one
+ *  borderless button (a box shows on hover). Its menu ends with the effort,
+ *  in a side menu that opens on hover. */
+export function ModelEffortPicker({ value }: { value: ModelRef | null }) {
+  const providers = useStore((s) => s.providers);
+  const opts = useChatOptions();
+  const defaultEffort = useStore((s) => s.settings?.defaultEffort);
+  const presets = useStore((s) => s.presets);
+  const [anchor, setAnchor] = useState<Anchor | null>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  const provider = providers.find((p) => p.id === value?.providerId);
+  const close = () => setAnchor(null);
+  const presetEffort = presets.find((p) => p.id === opts.presetId)?.effort ?? null;
+  const effort = effortOf(opts.effort ?? presetEffort ?? defaultEffort);
+  const effortLabel = EFFORTS.find((e) => e.value === effort)?.label ?? "Medium";
+  return (
+    <>
       <button
-        className="menu-item"
-        onClick={() => {
-          onClose();
-          useStore.getState().openSettings("models");
-        }}
+        ref={btn}
+        className={`chip model-chip ${anchor ? "open" : ""}`}
+        onClick={() => (anchor ? close() : setAnchor(anchorFrom(btn.current!, { above: true, alignRight: true })))}
+        title={value ? `${provider?.name ?? ""} · ${value.model} · ${effortLabel} effort` : "Pick a model"}
       >
-        <span className="menu-icon">
-          <Settings2 size={15} />
-        </span>
-        <span className="menu-label">Manage models…</span>
+        <span className="chip-label">{value ? shortModel(value.model) : "Pick a model"}</span>
+        {value && <span className="model-chip-effort">{effortLabel}</span>}
       </button>
+      <Popover anchor={anchor} onClose={close} width={320} className="model-pop" trigger={btn}>
+        <ModelMenu
+          value={value}
+          onClose={close}
+          onPick={(ref) => {
+            close();
+            useStore.getState().pickModel(ref);
+          }}
+          footer={
+            <SubmenuItem label="Effort" value={effortLabel} width={250}>
+              {(done) =>
+                EFFORTS.map((e) => (
+                  <MenuItem
+                    key={e.value}
+                    checked={effort === e.value}
+                    onSelect={() => {
+                      done();
+                      close();
+                      useStore.getState().setOptions({ effort: e.value });
+                    }}
+                  >
+                    <span className="menu-two">
+                      <span>{e.label}</span>
+                      <span className="menu-sub">{e.hint}</span>
+                    </span>
+                  </MenuItem>
+                ))
+              }
+            </SubmenuItem>
+          }
+        />
+      </Popover>
     </>
   );
 }

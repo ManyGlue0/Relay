@@ -24,16 +24,18 @@
 
 ## Highlights
 
-- **Any OpenAI-compatible endpoint.** Ollama, LM Studio, llama.cpp, vLLM, OpenAI, OpenRouter, or your own server. Add it once with its address, test the connection, and its models show up in the picker. A server with more models than you want (LM Studio) can show only the ones you pick. Each provider shows its service's logo, or an icon or image you choose.
-- **Files, pictures, sound and video.** Attach with the paperclip, drop files on the chat, or paste a screenshot. Each model gets everything it can take: images as images, audio as audio, video whole to models that watch video (else as stills, plus its sound for models that hear), PDFs as files where the server reads them (else their text; scans without text go as their pages, as images), and Word, PowerPoint, code and text files as text. Click any file to see it in Relay: images and videos big, code and text in a text box, PDFs page by page. Relay knows what each model takes where the server says (LM Studio, Ollama, llama.cpp, OpenRouter) or from its name, warns before you send something it may not take, and lets you correct it per model.
+- **Any OpenAI-compatible endpoint, and Anthropic's own API.** Ollama, LM Studio, llama.cpp, vLLM, OpenAI, OpenRouter, or your own server. Add it once with its address, test the connection, and its models show up in the picker. A server with more models than you want (LM Studio) can show only the ones you pick. Each provider shows its service's logo, or an icon or image you choose.
+- **Claude, natively.** Providers set to *Anthropic* use the Messages API: Claude's thinking shows as a readable summary, signed thinking and web search results carry over between messages, and the conversation stays in Anthropic's prompt cache (5 minutes or an hour, your choice).
+- **Web search, for every model.** One switch per chat. Claude uses Anthropic's own web search and page reading; every other model gets Relay's: DuckDuckGo results and pages read as text, no key or account needed.
+- **Files, pictures, sound and video.** Add files from the composer's **+** menu, drop files on the chat, or paste a screenshot. Each model gets everything it can take: images as images, audio as audio, video whole to models that watch video (else as stills, plus its sound for models that hear), PDFs as files where the server reads them (else their text; scans without text go as their pages, as images), and Word, PowerPoint, code and text files as text. Click any file to see it in Relay: images and videos big, code and text in a text box, PDFs page by page. Relay knows what each model takes where the server says (LM Studio, Ollama, llama.cpp, OpenRouter) or from its name, warns before you send something it may not take, and lets you correct it per model.
 - **Voice messages.** Press the mic, talk, press it again: the recording goes to the model as audio, so a model that hears gets your voice itself, not a transcript.
 - **Knows what's online.** The model picker checks your servers each time it opens: models that can't answer right now wait in a folded *Offline* section, and new models on a server appear by themselves.
 - **Tools through MCP.** Add MCP servers by command (`npx`, `uvx`, anything) or by address (Streamable HTTP), or import a Claude Desktop config. Relay asks before every tool call (*Allow once*, *Always allow*, *Deny*), and each tool can be set to Ask, Allow or Off.
 - **Skills.** Folders of instructions, references and scripts in the Agent Skills format (`SKILL.md`). Models see each skill's name and description and load the rest when a task calls for it; scripts run only after you say yes (or once you trust that skill).
 - **Edit, retry, branch.** Edit any of your messages or try a reply again, with the same model or another one. Every version is kept: switch between them with ‹ 1 / 3 ›.
-- **Thinking effort.** Off, Low, Medium, High, Extra high or Max per chat, sent the ways servers understand it (`reasoning_effort`, chat-template options). A server that only knows up to High gets High.
+- **Thinking effort.** Off, Low, Medium, High, Extra high or Max per chat, next to the model in the composer, sent the ways servers understand it (`reasoning_effort`, chat-template options, Anthropic's `effort`). A server that only knows up to High gets High.
 - **It knows you.** Tell Relay your name, what you do and how you like answers in **You**; it's added to every chat, and you can see exactly what models see.
-- **Presets.** Saved system prompts with their own temperature, top P, length and effort. Pick one per chat, or make one the default.
+- **Presets.** Saved system prompts with their own temperature, top P, length and effort. Pick one per chat from the **+** menu, or make one the default. (Anthropic's API no longer takes temperature or top P; Claude gets the rest.)
 - **Streaming that survives anything.** Replies stream in the background: switch chats, close the window to the tray, or reload, and nothing is lost. `Esc` stops a reply.
 - **Reasoning you can fold away.** Thinking models (`reasoning_content`, `reasoning`, or inline `<think>` tags) get a folding "Thought for 12 s" section. Their thinking goes back to the model with earlier replies and tool calls (as `reasoning_content`), so it keeps its train of thought; turn that off in Settings → Models. A server that refuses the field gets the chat without it.
 - **Rich answers.** Markdown, tables, syntax-highlighted code with one-click copy, and LaTeX math.
@@ -78,9 +80,11 @@ Relay is a [Holster](https://github.com/ManyGlue0/Holster) app. Holster is a doc
 | llama.cpp (`llama-server`) | `http://localhost:8080/v1` |
 | vLLM | `http://localhost:8000/v1` |
 | OpenAI | `https://api.openai.com/v1` |
-| Anthropic | `https://api.anthropic.com/v1` (its OpenAI-compatible API) |
+| Anthropic | `https://api.anthropic.com/v1` (the API is set to *Anthropic*) |
 | SpaceXSI (Grok) | `https://api.x.ai/v1` |
 | OpenRouter | `https://openrouter.ai/api/v1` |
+
+Each provider has an **API**: *OpenAI-compatible* (Chat Completions, what most servers speak) or *Anthropic* (the Messages API, for Anthropic and servers that copy it). The Anthropic preset picks *Anthropic*.
 
 Endpoints that don't list their models can still be used: add model ids by hand in the provider's **Models** list. Relay detects each model's context window where the server says it (llama.cpp, LM Studio, Ollama, vLLM, OpenRouter); you can also set it by hand.
 
@@ -100,7 +104,14 @@ A skill teaches models one kind of task. It's a folder with a `SKILL.md` (a `nam
 
 - Models get each enabled skill's name and description. When a request fits, they load the skill's instructions, read its files, and run its scripts.
 - Scripts (`.py`, `.js`, `.ps1`, `.sh`, `.bat`, `.cmd`, `.exe`) ask before every run, unless you turn on *Run scripts without asking* for that skill (or press *Always allow*). They run in Relay's workspace folder, without a console window, for up to 5 minutes. Python scripts need Python installed, and Node scripts need Node.
-- Skills work in chats that use tools: the composer's Tools chip turns both off for a chat.
+- The composer's **+** menu has a switch for skills and one for MCP tools, per chat.
+
+## Web search
+
+Turn on **Web search** in the composer's **+** menu, per chat (new chats start with the switches you used last).
+
+- Claude on Anthropic's API searches and reads pages with Anthropic's own tools (billed by Anthropic per search).
+- Every other model gets Relay's two tools: a search of DuckDuckGo (its plain results page, no key or account) and a page reader that returns a page's text, in parts for long ones. They run without asking; Relay doesn't read addresses on your computer or local network.
 
 ## Keyboard
 
@@ -121,7 +132,7 @@ A skill teaches models one kind of task. It's a folder with a `SKILL.md` (a `nam
 - Everything stays on your computer: chats live in a SQLite database in `%APPDATA%\app.relay.desktop\`, and attached files in its `attachments` folder (removed when their chat is deleted).
 - The microphone is only on while you record a voice message. Windows' microphone setting decides whether Relay may use it.
 - API keys are stored in **Windows Credential Manager** (as `Relay/provider/…`), never in Relay's files.
-- Relay only talks to the endpoints you add, plus Holster on `127.0.0.1`. Remote images in replies are shown as links, not fetched.
+- Relay only talks to the endpoints you add, plus Holster on `127.0.0.1`. With Web search on, models other than Claude search DuckDuckGo and read the pages they choose, through Relay. Remote images in replies are shown as links, not fetched.
 
 ## Build from source
 

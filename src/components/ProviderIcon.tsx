@@ -19,7 +19,7 @@ const clean = (svg: string) => svg.replace(/<title>[\s\S]*?<\/title>/g, "");
 export const BRANDS: { id: string; name: string; svg: string }[] = [
   { id: "openai", name: "OpenAI", svg: clean(openai) },
   { id: "anthropic", name: "Anthropic", svg: clean(anthropic) },
-  { id: "grok", name: "SpaceXAI", svg: clean(grok) },
+  { id: "grok", name: "SpaceXSI", svg: clean(grok) },
   { id: "openrouter", name: "OpenRouter", svg: clean(openrouter) },
   { id: "ollama", name: "Ollama", svg: clean(ollama) },
   { id: "lmstudio", name: "LM Studio", svg: clean(lmstudio) },

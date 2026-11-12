@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowUp, BookMarked, Brain, ChevronDown, Mic, Paperclip, Settings2, Square, Wrench, type LucideIcon } from "lucide-react";
+import { BookMarked, Brain, ChevronDown, Mic, Paperclip, Settings2, Square, Wrench, type LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { EFFORTS, effortOf } from "../lib/api";
 import { clock, micError, record, type Recording } from "../lib/media";
@@ -119,7 +119,7 @@ export function Composer({ chatId, streaming }: { chatId: string | null; streami
             transition={spring}
             onClick={() => useStore.getState().stop()}
           >
-            <Square size={12} fill="currentColor" />
+            <SendGlyph kind="stop" />
           </motion.button>
         ) : (
           <motion.button
@@ -134,11 +134,39 @@ export function Composer({ chatId, streaming }: { chatId: string | null; streami
             transition={spring}
             onClick={() => void submit()}
           >
-            <ArrowUp size={17} strokeWidth={2.4} />
+            <SendGlyph kind="send" />
           </motion.button>
         )}
       </div>
     </div>
+  );
+}
+
+/** The send and stop buttons draw their disc and glyph in one SVG. Chrome
+ *  snaps an icon to whole pixels but paints a background at the button's exact
+ *  spot, so on a button at x.5 a separate icon sat half a pixel off; drawn
+ *  together they can't drift apart. The arrow is lucide's ArrowUp at 17px, 1px
+ *  below center: its weight is in the head, so centered it looks high. */
+function SendGlyph({ kind }: { kind: "send" | "stop" }) {
+  return (
+    <svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true">
+      <circle className="send-disc" cx="16" cy="16" r="16" />
+      {kind === "send" ? (
+        <g
+          transform="translate(7.5 8.5) scale(0.708333)"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.4"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="m5 12 7-7 7 7" />
+          <path d="M12 19V5" />
+        </g>
+      ) : (
+        <rect x="11" y="11" width="10" height="10" rx="1.5" fill="currentColor" />
+      )}
+    </svg>
   );
 }
 

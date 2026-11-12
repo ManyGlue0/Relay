@@ -97,7 +97,7 @@ const PRESETS: { name: string; url: string; icon: string }[] = [
   { name: "vLLM", url: "http://localhost:8000/v1", icon: "brand:vllm" },
   { name: "OpenAI", url: "https://api.openai.com/v1", icon: "brand:openai" },
   { name: "Anthropic", url: "https://api.anthropic.com/v1", icon: "brand:anthropic" },
-  { name: "SpaceXAI", url: "https://api.x.ai/v1", icon: "brand:grok" },
+  { name: "SpaceXSI", url: "https://api.x.ai/v1", icon: "brand:grok" },
   { name: "OpenRouter", url: "https://openrouter.ai/api/v1", icon: "brand:openrouter" },
 ];
 

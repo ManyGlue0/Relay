@@ -1449,22 +1449,28 @@ body.resizing .titlebar-title {
   border-radius: 50%;
   display: grid;
   place-items: center;
-  background: var(--accent);
   color: var(--on-accent);
-  transition: background 0.15s ease, opacity 0.15s ease;
+  transition: color 0.15s ease, opacity 0.15s ease;
 }
-/* The arrowhead's weight sits at the top, so a centered arrow looks high;
-   1px down puts its ink in the middle of the circle (measured). */
-.send-btn .lucide-arrow-up {
-  transform: translateY(1px);
+/* The disc is drawn in the same SVG as the glyph (SendGlyph in Composer.tsx). */
+.send-btn svg {
+  display: block;
+}
+.send-disc {
+  fill: var(--accent);
+  transition: fill 0.15s ease;
 }
 .send-btn:disabled {
-  background: var(--border-strong);
   color: var(--text-3);
 }
+.send-btn:disabled .send-disc {
+  fill: var(--border-strong);
+}
 .send-btn.stop {
-  background: var(--text);
   color: var(--composer);
+}
+.send-btn.stop .send-disc {
+  fill: var(--text);
 }
 :root[data-theme="dark"] .send-btn.stop {
   color: #18181c;

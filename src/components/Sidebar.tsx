@@ -1,8 +1,11 @@
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  Archive,
+  ArchiveRestore,
   ArrowLeft,
   BarChart3,
   BookMarked,
+  ChevronRight,
   Ellipsis,
   Info,
   MessageSquareDashed,
@@ -147,7 +150,9 @@ function SettingsNav({ rail }: { rail: boolean }) {
 }
 
 function ChatList() {
-  const chats = useStore((s) => s.chats);
+  const all = useStore((s) => s.chats);
+  const chats = useMemo(() => all.filter((c) => !c.archived), [all]);
+  const archived = useMemo(() => all.filter((c) => c.archived), [all]);
   const groups = useMemo(() => {
     const out: { label: string; chats: ChatSummary[] }[] = [];
     const now = new Date();
@@ -160,7 +165,7 @@ function ChatList() {
     return out;
   }, [chats]);
 
-  if (!chats.length) {
+  if (!chats.length && !archived.length) {
     return (
       <div className="list-empty">
         <MessageSquareDashed size={18} />
@@ -170,6 +175,7 @@ function ChatList() {
   }
   return (
     <>
+      {archived.length > 0 && <ArchivedGroup chats={archived} />}
       {groups.map((g) => (
         <section key={g.label} className="chat-group">
           <div className="group-label">{g.label}</div>
@@ -181,6 +187,46 @@ function ChatList() {
         </section>
       ))}
     </>
+  );
+}
+
+/** Archived chats: one folded row under the search box. */
+function ArchivedGroup({ chats }: { chats: ChatSummary[] }) {
+  const currentId = useStore((s) => s.currentId);
+  const [open, setOpen] = useState(() => chats.some((c) => c.id === currentId));
+  // Opening an archived chat (from search, or Holster) unfolds the group.
+  useEffect(() => {
+    if (chats.some((c) => c.id === currentId)) setOpen(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentId]);
+  return (
+    <section className="chat-group archived-group">
+      <button className="side-row archived-head" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <Archive size={16} className="side-icon" />
+        <span className="side-label">Archived</span>
+        <span className="archived-count">{chats.length}</span>
+        <ChevronRight size={14} className={`archived-caret ${open ? "open" : ""}`} />
+      </button>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            className="archived-list"
+            style={{ overflow: "hidden" }}
+            initial={{ height: 0, opacity: 0 }}
+            // Clipped only while it folds: the selection pill travels between rows.
+            animate={{ height: "auto", opacity: 1, transitionEnd: { overflow: "visible" } }}
+            exit={{ height: 0, opacity: 0, overflow: "hidden" }}
+            transition={spring}
+          >
+            <AnimatePresence initial={false}>
+              {chats.map((c) => (
+                <ChatRow key={c.id} chat={c} />
+              ))}
+            </AnimatePresence>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </section>
   );
 }
 
@@ -260,6 +306,15 @@ function ChatRow({ chat }: { chat: ChatSummary }) {
           >
             {chat.pinned ? "Unpin" : "Pin"}
           </MenuItem>
+          <MenuItem
+            icon={chat.archived ? <ArchiveRestore size={15} /> : <Archive size={15} />}
+            onSelect={() => {
+              setMenu(null);
+              void useStore.getState().archiveChat(chat.id, !chat.archived);
+            }}
+          >
+            {chat.archived ? "Unarchive" : "Archive"}
+          </MenuItem>
           <MenuSeparator />
           <MenuItem
             danger
@@ -330,7 +385,10 @@ function Results({ hits }: { hits: SearchHit[] }) {
           transition={{ ...rowSpring, delay: Math.min(i, 8) * 0.03 }}
           onClick={() => void useStore.getState().openChat(h.chatId)}
         >
-          <span className="hit-title">{h.title || "New chat"}</span>
+          <span className="hit-head">
+            <span className="hit-title">{h.title || "New chat"}</span>
+            {h.archived && <span className="hit-tag">Archived</span>}
+          </span>
           {h.snippet && <span className="hit-snippet">{highlighted(h.snippet)}</span>}
         </motion.button>
       ))}

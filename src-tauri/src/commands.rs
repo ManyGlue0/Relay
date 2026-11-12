@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::db::{new_id, now_ms, Chat, ChatOptions, ChatSummary, McpServer, Message, Preset, Provider, SearchHit, Usage};
+use crate::attachments::{self, Attachment};
+use crate::db::{new_id, now_ms, Caps, Chat, ChatOptions, ChatSummary, McpServer, Message, Preset, Provider, SearchHit, Usage};
 use crate::mcp::{self, ServerStatus};
 use crate::settings::Settings;
 use crate::{chat, holster, llm, secrets, skills, Core};
@@ -176,6 +177,8 @@ pub fn provider_save(core: CoreState, input: ProviderInput) -> Result<Provider, 
         show_all: true,
         icon: None,
         contexts: HashMap::new(),
+        caps: HashMap::new(),
+        caps_user: HashMap::new(),
         has_key: false,
         sort,
     });
@@ -189,6 +192,7 @@ pub fn provider_save(core: CoreState, input: ProviderInput) -> Result<Provider, 
         p.models.clear();
         p.models_at = 0;
         p.contexts.clear();
+        p.caps.clear();
     }
     p.name = name.to_string();
     p.base_url = base_url;
@@ -344,6 +348,133 @@ pub async fn model_context(core: CoreState<'_>, provider_id: String, model: Stri
         }
     }
     Ok(found)
+}
+
+/// What a model takes besides text: `caps` is what Relay goes by (detected or
+/// guessed, with the user's word over it), `user` what the user said.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCaps {
+    caps: Caps,
+    detected: Caps,
+    user: HashMap<String, bool>,
+}
+
+fn model_caps_of(p: &Provider, model: &str) -> ModelCaps {
+    let detected = p.caps.get(model).copied().unwrap_or_else(|| llm::guess_caps(&p.base_url, model));
+    let user = p.caps_user.get(model).cloned().unwrap_or_default();
+    ModelCaps { caps: detected.with_user(Some(&user)), detected, user }
+}
+
+/// What a model takes: remembered, or asked of the server once.
+#[tauri::command]
+pub async fn model_caps(core: CoreState<'_>, provider_id: String, model: String) -> Result<Option<ModelCaps>, String> {
+    let Some(p) = core.db.provider(&provider_id)? else { return Ok(None) };
+    if p.caps.contains_key(&model) {
+        return Ok(Some(model_caps_of(&p, &model)));
+    }
+    let key = secrets::key(&p.id);
+    let found = llm::detect_caps(&p.base_url, key.as_deref(), &model).await;
+    // Read again: the user may have edited the provider meanwhile.
+    let Some(mut fresh) = core.db.provider(&provider_id)? else { return Ok(None) };
+    if let Some(caps) = found {
+        fresh.caps.insert(model.clone(), caps);
+        core.db.save_provider(&fresh)?;
+    }
+    Ok(Some(model_caps_of(&fresh, &model)))
+}
+
+/// The user's word on one ability of a model (None: go back to what was detected).
+#[tauri::command]
+pub fn model_caps_set(core: CoreState, provider_id: String, model: String, ability: String, on: Option<bool>) -> Result<ModelCaps, String> {
+    if !Caps::ABILITIES.contains(&ability.as_str()) {
+        return Err(format!("Relay doesn't know \"{ability}\""));
+    }
+    let mut p = core.db.provider(&provider_id)?.ok_or("That provider was removed")?;
+    let user = p.caps_user.entry(model.clone()).or_default();
+    match on {
+        Some(v) => {
+            user.insert(ability, v);
+        }
+        None => {
+            user.remove(&ability);
+        }
+    }
+    if user.is_empty() {
+        p.caps_user.remove(&model);
+    }
+    core.db.save_provider(&p)?;
+    Ok(model_caps_of(&p, &model))
+}
+
+// ---- attachments ------------------------------------------------------------------------
+
+fn files_root(core: &Core) -> std::path::PathBuf {
+    attachments::root(&core.data_dir)
+}
+
+/// A file from disk (picked or dropped).
+#[tauri::command]
+pub async fn attach_path(core: CoreState<'_>, path: String) -> Result<Attachment, String> {
+    let root = files_root(&core);
+    tauri::async_runtime::spawn_blocking(move || attachments::add_path(&root, std::path::Path::new(&path))).await.map_err(|e| e.to_string())?
+}
+
+fn header(request: &tauri::ipc::Request<'_>, name: &str) -> Option<String> {
+    request.headers().get(name).and_then(|v| v.to_str().ok()).map(attachments::decode_header)
+}
+
+fn raw_body(request: &tauri::ipc::Request<'_>) -> Result<Vec<u8>, String> {
+    match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => Ok(bytes.clone()),
+        _ => Err("The file didn't come through".into()),
+    }
+}
+
+/// A file from bytes: pasted, or a voice message. Headers: `x-name`
+/// (URI-encoded), and for recordings `x-voice: 1` and `x-duration` (seconds).
+#[tauri::command]
+pub async fn attach_bytes(core: CoreState<'_>, request: tauri::ipc::Request<'_>) -> Result<Attachment, String> {
+    let bytes = raw_body(&request)?;
+    let name = header(&request, "x-name").filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "file".into());
+    let voice = header(&request, "x-voice").as_deref() == Some("1");
+    let duration = header(&request, "x-duration").and_then(|d| d.parse().ok());
+    let root = files_root(&core);
+    tauri::async_runtime::spawn_blocking(move || attachments::add_bytes(&root, &name, &bytes, voice, duration)).await.map_err(|e| e.to_string())?
+}
+
+/// A file Relay made for an attachment (headers `x-id`, `x-file`, `x-at`): a
+/// video still or the sound of a video or audio file.
+#[tauri::command]
+pub fn attach_put(core: CoreState, request: tauri::ipc::Request<'_>) -> Result<Attachment, String> {
+    let bytes = raw_body(&request)?;
+    let id = header(&request, "x-id").unwrap_or_default();
+    let file = header(&request, "x-file").unwrap_or_default();
+    let at = header(&request, "x-at").and_then(|d| d.parse().ok());
+    attachments::put(&files_root(&core), &id, &file, &bytes, at)
+}
+
+/// What the UI measured of a video or audio file.
+#[tauri::command]
+pub fn attach_info(core: CoreState, id: String, duration: Option<f64>, width: Option<u32>, height: Option<u32>) -> Result<Attachment, String> {
+    attachments::set_info(&files_root(&core), &id, duration, width, height)
+}
+
+/// Files taken out of the composer before sending.
+#[tauri::command]
+pub fn attach_discard(core: CoreState, ids: Vec<String>) -> Result<(), String> {
+    let keep = core.db.attachment_ids(None)?;
+    attachments::forget(&files_root(&core), ids, &keep);
+    Ok(())
+}
+
+/// Opens an attachment in the app Windows uses for it.
+#[tauri::command]
+pub fn attach_open(app: AppHandle, core: CoreState, id: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let root = files_root(&core);
+    let a = attachments::load(&root, &id)?;
+    app.opener().open_path(attachments::path_of(&root, &a).to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
 }
 
 // ---- presets --------------------------------------------------------------------------
@@ -571,9 +702,19 @@ pub fn chat_pin(core: CoreState, id: String, pinned: bool) -> Result<(), String>
 }
 
 #[tauri::command]
+pub fn chat_archive(app: AppHandle, core: CoreState, id: String, archived: bool) -> Result<(), String> {
+    core.db.set_archived(&id, archived)?;
+    holster::publish(&app);
+    Ok(())
+}
+
+#[tauri::command]
 pub fn chat_delete(app: AppHandle, core: CoreState, id: String) -> Result<(), String> {
     core.streams.stop_chat(&id);
+    let files = core.db.attachment_ids(Some(&id))?;
     core.db.delete_chat(&id)?;
+    // Its files go too, unless another chat's message still holds them.
+    attachments::forget(&files_root(&core), files, &core.db.attachment_ids(None)?);
     holster::seen(&id);
     holster::publish(&app);
     Ok(())
@@ -584,7 +725,9 @@ pub fn chats_delete_all(app: AppHandle, core: CoreState) -> Result<(), String> {
     for id in core.streams.active_chats() {
         core.streams.stop_chat(&id);
     }
+    let files = core.db.attachment_ids(None)?;
     core.db.delete_all_chats()?;
+    attachments::forget(&files_root(&core), files, &Default::default());
     holster::publish(&app);
     Ok(())
 }
@@ -616,18 +759,20 @@ pub fn chat_send(
     core: CoreState,
     chat_id: Option<String>,
     text: String,
+    attachments: Option<Vec<String>>,
     provider_id: String,
     model: String,
     options: Option<ChatOptions>,
 ) -> Result<SendResult, String> {
-    if text.trim().is_empty() {
+    let files = attachments.unwrap_or_default();
+    if text.trim().is_empty() && files.is_empty() {
         return Err("Type a message first".into());
     }
     let chat_id = match chat_id {
         Some(id) => id,
         None => core.db.create_chat(Some(&provider_id), Some(&model), &options.unwrap_or_default())?.id,
     };
-    let sent = chat::send(&app, &chat_id, &text, &provider_id, &model)?;
+    let sent = chat::send(&app, &chat_id, &text, &files, &provider_id, &model)?;
     let chat = core.db.chat_summary(&chat_id)?.ok_or("That chat no longer exists")?;
     Ok(SendResult { chat, user: sent.user, assistant: sent.assistant })
 }
@@ -646,13 +791,15 @@ pub fn chat_edit(
     chat_id: String,
     message_id: String,
     text: String,
+    attachments: Option<Vec<String>>,
     provider_id: String,
     model: String,
 ) -> Result<Chat, String> {
-    if text.trim().is_empty() {
+    let files = attachments.unwrap_or_default();
+    if text.trim().is_empty() && files.is_empty() {
         return Err("The message can't be empty".into());
     }
-    chat::edit(&app, &chat_id, &message_id, &text, &provider_id, &model)?;
+    chat::edit(&app, &chat_id, &message_id, &text, &files, &provider_id, &model)?;
     reloaded(&core, &chat_id)
 }
 
@@ -700,7 +847,13 @@ pub fn chat_markdown(core: CoreState, id: String) -> Result<String, String> {
     let mut out = format!("# {title}\n\n");
     for m in &chat.messages {
         let who = if m.role == "user" { "You".to_string() } else { m.model.clone().unwrap_or_else(|| "Assistant".into()) };
-        out.push_str(&format!("**{who}**\n\n{}\n\n", m.content.trim()));
+        out.push_str(&format!("**{who}**\n\n"));
+        if !m.attachments.is_empty() {
+            out.push_str(&format!("*Attached: {}*\n\n", attachments::describe(&m.attachments)));
+        }
+        if !m.content.trim().is_empty() {
+            out.push_str(&format!("{}\n\n", m.content.trim()));
+        }
     }
     Ok(out)
 }

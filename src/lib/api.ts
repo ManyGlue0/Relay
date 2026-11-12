@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 export type Theme = "system" | "light" | "dark";
@@ -156,6 +156,49 @@ export interface ChatSummary {
   presetId: string | null;
   effort: Effort | null;
   tools: boolean;
+  /** In the sidebar's Archived group. */
+  archived: boolean;
+}
+
+export type AttachmentKind = "image" | "audio" | "video" | "pdf" | "document" | "text";
+
+/** A file sent with a message (attachments.rs). */
+export interface Attachment {
+  id: string;
+  name: string;
+  kind: AttachmentKind;
+  mime: string;
+  size: number;
+  /** Its name in the attachment's folder. */
+  file: string;
+  width?: number;
+  height?: number;
+  /** Seconds (audio, video). */
+  duration?: number;
+  /** Video: when each still was taken (x/frame-N.jpg). */
+  frames?: number[];
+  /** x/sound.wav exists. */
+  sound?: boolean;
+  /** PDFs and documents: characters of text read from it. */
+  chars?: number;
+  /** Recorded in Relay. */
+  voice?: boolean;
+}
+
+export type Ability = "vision" | "audio" | "video" | "pdf";
+export type Caps = Record<Ability, boolean>;
+
+/** What a model takes: `caps` is what Relay goes by; `user`, what the user said over the detected `detected`. */
+export interface ModelCaps {
+  caps: Caps;
+  detected: Caps;
+  user: Partial<Record<Ability, boolean>>;
+}
+
+/** A URL the window can load for an attachment's file (or one of Relay's, like "x/frame-0.jpg"). */
+export function fileUrl(a: Attachment, file: string = a.file): string {
+  // convertFileSrc encodes the whole path (slashes too); serve() decodes it once.
+  return convertFileSrc(`${a.id}/${file}`, "relay");
 }
 
 export interface MessageStats {
@@ -193,6 +236,8 @@ export interface Message {
   error: string | null;
   stats: MessageStats | null;
   createdAt: number;
+  /** Files sent with a user message. */
+  attachments: Attachment[];
   /** Streaming replies: how many batches `parts` already holds. */
   seq: number;
   /** This message and its alternatives, oldest first. */
@@ -218,6 +263,7 @@ export interface SearchHit {
   title: string;
   updatedAt: number;
   snippet: string;
+  archived: boolean;
 }
 
 export interface HolsterStatus {
@@ -296,6 +342,22 @@ export const api = {
   testProvider: (baseUrl: string, key?: string, id?: string) => invoke<string[]>("provider_test", { baseUrl, key, id }),
   refreshProvider: (id: string) => invoke<Provider>("provider_refresh", { id }),
   modelContext: (providerId: string, model: string) => invoke<number | null>("model_context", { providerId, model }),
+  modelCaps: (providerId: string, model: string) => invoke<ModelCaps | null>("model_caps", { providerId, model }),
+  /** `on` null: back to what was detected. */
+  setModelCap: (providerId: string, model: string, ability: Ability, on: boolean | null) =>
+    invoke<ModelCaps>("model_caps_set", { providerId, model, ability, on }),
+
+  attachPath: (path: string) => invoke<Attachment>("attach_path", { path }),
+  attachBytes: (name: string, bytes: Uint8Array, extra: { voice?: boolean; duration?: number } = {}) =>
+    invoke<Attachment>("attach_bytes", bytes, {
+      headers: { "x-name": encodeURIComponent(name), ...(extra.voice ? { "x-voice": "1" } : {}), ...(extra.duration ? { "x-duration": String(extra.duration) } : {}) },
+    }),
+  /** A still ("frame-N.jpg", taken at `at` seconds) or the sound ("sound.wav") Relay made of a file. */
+  attachPut: (id: string, file: string, bytes: Uint8Array, at?: number) =>
+    invoke<Attachment>("attach_put", bytes, { headers: { "x-id": id, "x-file": file, ...(at !== undefined ? { "x-at": String(at) } : {}) } }),
+  attachInfo: (id: string, info: { duration?: number; width?: number; height?: number }) => invoke<Attachment>("attach_info", { id, ...info }),
+  attachDiscard: (ids: string[]) => invoke<void>("attach_discard", { ids }),
+  attachOpen: (id: string) => invoke<void>("attach_open", { id }),
 
   presets: () => invoke<Preset[]>("presets_list"),
   savePreset: (preset: Partial<Preset> & { name: string }) => invoke<Preset>("preset_save", { preset: { id: "", systemPrompt: "", sort: 0, temperature: null, topP: null, maxTokens: null, effort: null, ...preset } }),
@@ -324,14 +386,15 @@ export const api = {
   chat: (id: string) => invoke<Chat | null>("chat_get", { id }),
   renameChat: (id: string, title: string) => invoke<void>("chat_rename", { id, title }),
   pinChat: (id: string, pinned: boolean) => invoke<void>("chat_pin", { id, pinned }),
+  archiveChat: (id: string, archived: boolean) => invoke<void>("chat_archive", { id, archived }),
   deleteChat: (id: string) => invoke<void>("chat_delete", { id }),
   deleteAllChats: () => invoke<void>("chats_delete_all"),
   setChatModel: (id: string, providerId: string, model: string) => invoke<void>("chat_set_model", { id, providerId, model }),
   setChatOptions: (id: string, options: ChatOptions) => invoke<ChatSummary | null>("chat_set_options", { id, options }),
-  send: (args: { chatId: string | null; text: string; providerId: string; model: string; options?: ChatOptions }) =>
+  send: (args: { chatId: string | null; text: string; attachments: string[]; providerId: string; model: string; options?: ChatOptions }) =>
     invoke<{ chat: ChatSummary; user: Message | null; assistant: Message }>("chat_send", args),
-  edit: (chatId: string, messageId: string, text: string, providerId: string, model: string) =>
-    invoke<Chat>("chat_edit", { chatId, messageId, text, providerId, model }),
+  edit: (chatId: string, messageId: string, text: string, attachments: string[], providerId: string, model: string) =>
+    invoke<Chat>("chat_edit", { chatId, messageId, text, attachments, providerId, model }),
   regenerate: (chatId: string, messageId: string, providerId: string, model: string) =>
     invoke<Chat>("chat_regenerate", { chatId, messageId, providerId, model }),
   branch: (chatId: string, messageId: string) => invoke<Chat>("chat_branch", { chatId, messageId }),

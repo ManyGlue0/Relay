@@ -9,7 +9,7 @@
 //! and tool calls with their results. `content` and `reasoning` hold the same
 //! text flattened, for search and for older rows that have no parts.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,6 +17,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+pub use crate::attachments::Attachment;
 
 pub fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
@@ -52,6 +54,12 @@ pub struct Provider {
     /// Context window per model: detected from the server, or set by the user.
     #[serde(default)]
     pub contexts: HashMap<String, u64>,
+    /// What each model takes besides text, as the server said (detected once, then kept).
+    #[serde(default)]
+    pub caps: HashMap<String, Caps>,
+    /// What the user said a model takes, over what was detected: model -> ability -> yes or no.
+    #[serde(default)]
+    pub caps_user: HashMap<String, HashMap<String, bool>>,
     #[serde(default)]
     pub has_key: bool,
     #[serde(default)]
@@ -108,6 +116,39 @@ pub struct McpServer {
     pub sort: i64,
 }
 
+/// What a model takes besides text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Caps {
+    pub vision: bool,
+    pub audio: bool,
+    pub video: bool,
+    /// PDFs as files (the server reads the pages); else Relay sends their text.
+    pub pdf: bool,
+}
+
+impl Caps {
+    pub const ABILITIES: [&'static str; 4] = ["vision", "audio", "video", "pdf"];
+
+    pub fn set(&mut self, ability: &str, on: bool) {
+        match ability {
+            "vision" => self.vision = on,
+            "audio" => self.audio = on,
+            "video" => self.video = on,
+            "pdf" => self.pdf = on,
+            _ => {}
+        }
+    }
+
+    /// These, with the user's word applied over them.
+    pub fn with_user(mut self, user: Option<&HashMap<String, bool>>) -> Caps {
+        for (ability, on) in user.into_iter().flatten() {
+            self.set(ability, *on);
+        }
+        self
+    }
+}
+
 fn yes() -> bool {
     true
 }
@@ -129,6 +170,8 @@ pub struct ChatSummary {
     /// None: the default from settings.
     pub effort: Option<String>,
     pub tools: bool,
+    /// Out of the main list (in the sidebar's Archived group).
+    pub archived: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -159,6 +202,8 @@ pub struct Message {
     pub error: Option<String>,
     pub stats: Option<Value>,
     pub created_at: i64,
+    /// Files sent with a user message (see attachments.rs).
+    pub attachments: Vec<Attachment>,
     /// Streaming replies only: the batches already in `parts` (see chat.rs).
     pub seq: u64,
     /// This message and its alternatives (same parent), oldest first.
@@ -173,6 +218,7 @@ pub struct SearchHit {
     pub updated_at: i64,
     /// Matched text with the hits wrapped in \u{1}…\u{2}.
     pub snippet: String,
+    pub archived: bool,
 }
 
 pub struct Db {
@@ -228,6 +274,15 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
 );
 "#;
 
+/// v5: files on messages, archived chats, and what each model takes
+/// (as detected, and as the user said).
+const SCHEMA_V5: &str = r#"
+ALTER TABLE messages ADD COLUMN attachments TEXT;
+ALTER TABLE chats ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE providers ADD COLUMN caps TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE providers ADD COLUMN caps_user TEXT NOT NULL DEFAULT '{}';
+"#;
+
 /// v4: a provider's icon (a logo, a plain icon, or an image); NULL picks one from the address.
 const SCHEMA_V4: &str = r#"
 ALTER TABLE providers ADD COLUMN icon TEXT;
@@ -279,11 +334,12 @@ const TITLE_PROVISIONAL: i64 = 1;
 const TITLE_GENERATED: i64 = 2;
 
 const MESSAGE_COLS: &str =
-    "id, chat_id, parent_id, role, content, reasoning, provider_id, model, status, error, stats, created_at, parts";
+    "id, chat_id, parent_id, role, content, reasoning, provider_id, model, status, error, stats, created_at, parts, attachments";
 
 fn message_from(row: &Row) -> rusqlite::Result<Message> {
     let stats: Option<String> = row.get(10)?;
     let parts: Option<String> = row.get(12)?;
+    let attachments: Option<String> = row.get(13)?;
     Ok(Message {
         id: row.get(0)?,
         chat_id: row.get(1)?,
@@ -298,12 +354,13 @@ fn message_from(row: &Row) -> rusqlite::Result<Message> {
         stats: stats.and_then(|s| serde_json::from_str(&s).ok()),
         created_at: row.get(11)?,
         parts: parts.and_then(|s| serde_json::from_str(&s).ok()),
+        attachments: attachments.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
         seq: 0,
         siblings: Vec::new(),
     })
 }
 
-const SUMMARY_COLS: &str = "id, title, provider_id, model, created_at, updated_at, pinned, preset_id, effort, tools";
+const SUMMARY_COLS: &str = "id, title, provider_id, model, created_at, updated_at, pinned, preset_id, effort, tools, archived";
 
 fn summary_from(row: &Row) -> rusqlite::Result<ChatSummary> {
     Ok(ChatSummary {
@@ -317,6 +374,7 @@ fn summary_from(row: &Row) -> rusqlite::Result<ChatSummary> {
         preset_id: row.get(7)?,
         effort: row.get(8)?,
         tools: row.get::<_, i64>(9)? != 0,
+        archived: row.get::<_, i64>(10)? != 0,
     })
 }
 
@@ -417,6 +475,9 @@ impl Db {
         if version < 4 {
             conn.execute_batch(&format!("BEGIN; {SCHEMA_V4} PRAGMA user_version = 4; COMMIT;"))?;
         }
+        if version < 5 {
+            conn.execute_batch(&format!("BEGIN; {SCHEMA_V5} PRAGMA user_version = 5; COMMIT;"))?;
+        }
         // A reply that was streaming when Relay closed will never finish.
         conn.execute("UPDATE messages SET status = 'stopped' WHERE status = 'streaming'", [])?;
         Ok(Self { conn: Mutex::new(conn) })
@@ -432,7 +493,7 @@ impl Db {
     pub fn providers(&self) -> Result<Vec<Provider>, String> {
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT id, name, base_url, models, models_at, custom_models, has_key, sort, contexts, show_all, icon
+                "SELECT id, name, base_url, models, models_at, custom_models, has_key, sort, contexts, show_all, icon, caps, caps_user
                  FROM providers ORDER BY sort, created_at",
             )?;
             let rows = st.query_map([], |r| {
@@ -448,6 +509,8 @@ impl Db {
                     contexts: json_of(r.get(8)?),
                     show_all: r.get::<_, i64>(9)? != 0,
                     icon: r.get(10)?,
+                    caps: json_of(r.get(11)?),
+                    caps_user: json_of(r.get(12)?),
                 })
             })?;
             rows.collect()
@@ -461,10 +524,11 @@ impl Db {
     pub fn save_provider(&self, p: &Provider) -> Result<(), String> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO providers (id, name, base_url, models, models_at, custom_models, has_key, sort, created_at, contexts, show_all, icon)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                "INSERT INTO providers (id, name, base_url, models, models_at, custom_models, has_key, sort, created_at, contexts, show_all, icon, caps, caps_user)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT(id) DO UPDATE SET name = ?2, base_url = ?3, models = ?4, models_at = ?5,
-                    custom_models = ?6, has_key = ?7, sort = ?8, contexts = ?10, show_all = ?11, icon = ?12",
+                    custom_models = ?6, has_key = ?7, sort = ?8, contexts = ?10, show_all = ?11, icon = ?12,
+                    caps = ?13, caps_user = ?14",
                 params![
                     p.id,
                     p.name,
@@ -477,7 +541,9 @@ impl Db {
                     now_ms(),
                     text_of(&p.contexts),
                     p.show_all as i64,
-                    p.icon
+                    p.icon,
+                    text_of(&p.caps),
+                    text_of(&p.caps_user)
                 ],
             )?;
             Ok(())
@@ -619,7 +685,7 @@ impl Db {
             c.query_row(
                 &format!("SELECT {SUMMARY_COLS}, system_prompt, leaf_id FROM chats WHERE id = ?1"),
                 [id],
-                |r| Ok((summary_from(r)?, r.get::<_, String>(10)?, r.get::<_, Option<String>>(11)?)),
+                |r| Ok((summary_from(r)?, r.get::<_, String>(11)?, r.get::<_, Option<String>>(12)?)),
             )
             .optional()
         })?;
@@ -744,6 +810,20 @@ impl Db {
         self.with(|c| c.execute("UPDATE chats SET pinned = ?2 WHERE id = ?1", params![id, pinned as i64]).map(|_| ()))
     }
 
+    pub fn set_archived(&self, id: &str, archived: bool) -> Result<(), String> {
+        self.with(|c| c.execute("UPDATE chats SET archived = ?2 WHERE id = ?1", params![id, archived as i64]).map(|_| ()))
+    }
+
+    /// The attachments messages still hold: in `chat_id`, or (None) anywhere.
+    pub fn attachment_ids(&self, chat_id: Option<&str>) -> Result<HashSet<String>, String> {
+        let lists: Vec<String> = self.with(|c| {
+            let mut st = c.prepare("SELECT attachments FROM messages WHERE attachments IS NOT NULL AND (?1 IS NULL OR chat_id = ?1)")?;
+            let rows = st.query_map([chat_id], |r| r.get(0))?;
+            rows.collect()
+        })?;
+        Ok(lists.iter().filter_map(|l| serde_json::from_str::<Vec<Attachment>>(l).ok()).flatten().map(|a| a.id).collect())
+    }
+
     pub fn set_leaf(&self, chat_id: &str, leaf: &str) -> Result<(), String> {
         self.with(|c| c.execute("UPDATE chats SET leaf_id = ?2 WHERE id = ?1", params![chat_id, leaf]).map(|_| ()))
     }
@@ -770,20 +850,25 @@ impl Db {
         parent_id: Option<&str>,
         role: &str,
         content: &str,
+        attachments: &[Attachment],
         provider_id: Option<&str>,
         model: Option<&str>,
         status: &str,
     ) -> Result<Message, String> {
         let id = new_id();
         let now = now_ms();
+        let files = if attachments.is_empty() { None } else { Some(text_of(&attachments)) };
+        // Search finds a message by its files' names too.
+        let searchable = std::iter::once(content).chain(attachments.iter().map(|a| a.name.as_str())).collect::<Vec<_>>().join("\n");
+        let searchable = searchable.trim();
         self.with(|c| {
             c.execute(
-                "INSERT INTO messages (id, chat_id, parent_id, role, content, provider_id, model, status, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![id, chat_id, parent_id, role, content, provider_id, model, status, now],
+                "INSERT INTO messages (id, chat_id, parent_id, role, content, provider_id, model, status, created_at, attachments)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![id, chat_id, parent_id, role, content, provider_id, model, status, now, files],
             )?;
-            if !content.is_empty() {
-                c.execute("INSERT INTO messages_fts (content, message_id, chat_id) VALUES (?1, ?2, ?3)", params![content, id, chat_id])?;
+            if !searchable.is_empty() {
+                c.execute("INSERT INTO messages_fts (content, message_id, chat_id) VALUES (?1, ?2, ?3)", params![searchable, id, chat_id])?;
             }
             c.execute("UPDATE chats SET leaf_id = ?2, updated_at = ?3 WHERE id = ?1", params![chat_id, id, now])?;
             Ok(())
@@ -837,18 +922,30 @@ impl Db {
         // Titles first: they're what people remember.
         for chat in self.chats()? {
             if chat.title.to_lowercase().contains(&needle) {
-                hits.push(SearchHit { chat_id: chat.id, title: chat.title, updated_at: chat.updated_at, snippet: String::new() });
+                hits.push(SearchHit {
+                    chat_id: chat.id,
+                    title: chat.title,
+                    updated_at: chat.updated_at,
+                    snippet: String::new(),
+                    archived: chat.archived,
+                });
             }
         }
         if let Some(q) = fts_query(input) {
             let found = self.with(|c| {
                 let mut st = c.prepare(
-                    "SELECT f.chat_id, c.title, c.updated_at, snippet(messages_fts, 0, char(1), char(2), '…', 14)
+                    "SELECT f.chat_id, c.title, c.updated_at, snippet(messages_fts, 0, char(1), char(2), '…', 14), c.archived
                      FROM messages_fts f JOIN chats c ON c.id = f.chat_id
                      WHERE messages_fts MATCH ?1 ORDER BY rank LIMIT 200",
                 )?;
                 let rows = st.query_map([q], |r| {
-                    Ok(SearchHit { chat_id: r.get(0)?, title: r.get(1)?, updated_at: r.get(2)?, snippet: r.get(3)? })
+                    Ok(SearchHit {
+                        chat_id: r.get(0)?,
+                        title: r.get(1)?,
+                        updated_at: r.get(2)?,
+                        snippet: r.get(3)?,
+                        archived: r.get::<_, i64>(4)? != 0,
+                    })
                 })?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()
             })?;
@@ -866,7 +963,8 @@ impl Db {
 
     /// The newest chats with their last message, for Holster's preview.
     pub fn recent(&self, n: usize) -> Result<Vec<(ChatSummary, String)>, String> {
-        let mut chats: Vec<ChatSummary> = self.chats()?.into_iter().filter(|c| !c.title.is_empty()).collect();
+        // Archived chats stay out of Holster's preview.
+        let mut chats: Vec<ChatSummary> = self.chats()?.into_iter().filter(|c| !c.title.is_empty() && !c.archived).collect();
         chats.sort_by_key(|c| std::cmp::Reverse(c.updated_at));
         chats.truncate(n);
         let mut out = Vec::new();
@@ -956,9 +1054,9 @@ mod tests {
     fn path_follows_the_branch() {
         let db = Db::memory();
         let chat = db.create_chat(Some("p"), Some("m"), &ChatOptions::default()).unwrap();
-        let a = db.add_message(&chat.id, None, "user", "hello there", None, None, "done").unwrap();
-        let b = db.add_message(&chat.id, Some(&a.id), "assistant", "hi", Some("p"), Some("m"), "done").unwrap();
-        let b2 = db.add_message(&chat.id, Some(&a.id), "assistant", "hey", Some("p"), Some("m"), "done").unwrap();
+        let a = db.add_message(&chat.id, None, "user", "hello there", &[], None, None, "done").unwrap();
+        let b = db.add_message(&chat.id, Some(&a.id), "assistant", "hi", &[], Some("p"), Some("m"), "done").unwrap();
+        let b2 = db.add_message(&chat.id, Some(&a.id), "assistant", "hey", &[], Some("p"), Some("m"), "done").unwrap();
         let full = db.chat(&chat.id).unwrap().unwrap();
         assert_eq!(full.leaf_id.as_deref(), Some(b2.id.as_str()));
         assert_eq!(full.messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), ["hello there", "hey"]);
@@ -974,7 +1072,7 @@ mod tests {
         let db = Db::memory();
         let chat = db.create_chat(None, None, &ChatOptions::default()).unwrap();
         db.set_title(&chat.id, "Rust lifetimes", true).unwrap();
-        let m = db.add_message(&chat.id, None, "user", "", None, None, "streaming").unwrap();
+        let m = db.add_message(&chat.id, None, "user", "", &[], None, None, "streaming").unwrap();
         db.finish_message(&m.id, "Borrowing explained with café examples", "", &json!([]), "done", None, &Value::Null).unwrap();
         assert_eq!(db.search("lifetimes", 10).unwrap().len(), 1);
         let hits = db.search("cafe borrow", 10).unwrap();
@@ -990,7 +1088,7 @@ mod tests {
         {
             let db = Db::open(&path).unwrap();
             let chat = db.create_chat(None, None, &ChatOptions::default()).unwrap();
-            db.add_message(&chat.id, None, "assistant", "", None, None, "streaming").unwrap();
+            db.add_message(&chat.id, None, "assistant", "", &[], None, None, "streaming").unwrap();
         }
         let db = Db::open(&path).unwrap();
         let chat = &db.chats().unwrap()[0];
@@ -1003,8 +1101,8 @@ mod tests {
     fn usage_counts_tokens_and_tools() {
         let db = Db::memory();
         let chat = db.create_chat(Some("p"), Some("m"), &ChatOptions::default()).unwrap();
-        let u = db.add_message(&chat.id, None, "user", "q", None, None, "done").unwrap();
-        let a = db.add_message(&chat.id, Some(&u.id), "assistant", "", Some("p"), Some("m"), "streaming").unwrap();
+        let u = db.add_message(&chat.id, None, "user", "q", &[], None, None, "done").unwrap();
+        let a = db.add_message(&chat.id, Some(&u.id), "assistant", "", &[], Some("p"), Some("m"), "streaming").unwrap();
         let parts = json!([{ "type": "tool", "id": "1" }, { "type": "text", "text": "a" }]);
         let stats = json!({ "promptTokens": 10, "completionTokens": 5, "tokensPerSec": 20.0, "ttftMs": 300 });
         db.finish_message(&a.id, "a", "", &parts, "done", None, &stats).unwrap();

@@ -5,6 +5,8 @@ import {
   applyOps,
   errorText,
   partsOf,
+  type Ability,
+  type Attachment,
   type Chat,
   type ChatOptions,
   type ChatSummary,
@@ -12,6 +14,7 @@ import {
   type McpStatus,
   type McpView,
   type Message,
+  type ModelCaps,
   type ModelRef,
   type Preset,
   type Provider,
@@ -21,6 +24,7 @@ import {
   type Skill,
   type StreamDelta,
 } from "./api";
+import { prepare } from "./media";
 
 export type SettingsSection = "general" | "you" | "models" | "presets" | "tools" | "skills" | "stats" | "about";
 
@@ -29,6 +33,18 @@ export interface Toast {
   text: string;
   action?: { label: string; run: () => void };
 }
+
+/** A file in the composer: still being copied and prepared, or ready to send. */
+export interface DraftFile {
+  key: string;
+  name: string;
+  ready: boolean;
+  /** There as soon as it's copied (thumbnails show while Relay prepares the rest). */
+  attachment?: Attachment;
+}
+
+/** Files a message may carry. */
+const MAX_FILES = 20;
 
 interface State {
   loaded: boolean;
@@ -63,6 +79,10 @@ interface State {
   contexts: Record<string, number | null>;
   /** Which providers answered at the last check (the model picker's Offline section). */
   online: Record<string, ProviderStatus>;
+  /** What each "provider/model" takes besides text, once asked. */
+  caps: Record<string, ModelCaps | null>;
+  /** Files in the composer, per chat ("new" for a new one), like the text drafts. */
+  files: Record<string, DraftFile[]>;
 
   init(): Promise<void>;
   /** Asks every provider whether it's there; at most every few seconds. */
@@ -75,13 +95,24 @@ interface State {
   openChat(id: string): Promise<void>;
   newChat(): void;
   send(text: string): Promise<boolean>;
-  edit(messageId: string, text: string): Promise<boolean>;
+  /** `keep`: the ids of the original's attachments that stay. */
+  edit(messageId: string, text: string, keep: string[]): Promise<boolean>;
   regenerate(messageId: string, model?: ModelRef): Promise<void>;
   branch(messageId: string): Promise<void>;
   stop(): void;
   decideTool(messageId: string, callId: string, decision: "once" | "always" | "deny"): Promise<void>;
   renameChat(id: string, title: string): Promise<void>;
   pinChat(id: string, pinned: boolean): Promise<void>;
+  archiveChat(id: string, archived: boolean): Promise<void>;
+  /** Adds files to the composer of the chat on screen: paths (picked, dropped) or pasted files. */
+  attach(src: { paths?: string[]; files?: File[] }): Promise<void>;
+  /** A voice message, recorded in Relay. */
+  attachVoice(wav: Uint8Array, seconds: number): Promise<void>;
+  detach(key: string): void;
+  /** Opens an attachment in the app Windows uses for it. */
+  openAttachment(id: string): Promise<void>;
+  ensureCaps(ref: ModelRef): void;
+  setCap(ref: ModelRef, ability: Ability, on: boolean | null): Promise<void>;
   deleteChat(id: string): Promise<void>;
   pickModel(ref: ModelRef): void;
   setOptions(opts: ChatOptions): void;
@@ -129,6 +160,8 @@ export const useStore = create<State>((set, get) => ({
   focusComposer: 0,
   contexts: {},
   online: {},
+  caps: {},
+  files: {},
 
   async probeProviders() {
     const now = Date.now();
@@ -228,18 +261,28 @@ export const useStore = create<State>((set, get) => ({
       return false;
     }
     const chatId = st.currentId;
+    const draftKey = chatId ?? "new";
+    const files = st.files[draftKey] ?? [];
+    if (files.some((f) => !f.ready)) {
+      st.toast("Wait a moment: a file is still being prepared");
+      return false;
+    }
+    const attachments = files.map((f) => f.attachment!.id);
     try {
-      const res = await api.send({ chatId, text, providerId: model.providerId, model: model.model, options: chatId ? undefined : st.draftOptions });
+      const res = await api.send({ chatId, text, attachments, providerId: model.providerId, model: model.model, options: chatId ? undefined : st.draftOptions });
       set((s) => {
         const chats = [res.chat, ...s.chats.filter((c) => c.id !== res.chat.id)];
         const streaming = { ...s.streaming, [res.chat.id]: true as const };
+        const left = { ...s.files };
+        delete left[draftKey];
         // Still looking at the chat we sent from (or the draft that became it)?
-        if (s.currentId !== chatId) return { chats, streaming };
+        if (s.currentId !== chatId) return { chats, streaming, files: left };
         const base: Chat = s.current && s.current.id === res.chat.id ? s.current : { ...res.chat, systemPrompt: "", leafId: null, messages: [] };
         const added = [res.user, { ...res.assistant, thinking: true }].filter(Boolean) as Message[];
         return {
           chats,
           streaming,
+          files: left,
           currentId: res.chat.id,
           current: { ...base, ...res.chat, leafId: res.assistant.id, messages: [...base.messages, ...added] },
         };
@@ -253,13 +296,13 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  async edit(messageId, text) {
+  async edit(messageId, text, keep) {
     const st = get();
     const model = activeModel(st);
     if (!model || !st.current) return false;
     try {
-      const chat = await api.edit(st.current.id, messageId, text, model.providerId, model.model);
-      set((s) => ({ current: chat, streaming: { ...s.streaming, [chat.id]: true } }));
+      const chat = await api.edit(st.current.id, messageId, text, keep, model.providerId, model.model);
+      set((s) => ({ current: chat, chats: s.chats.map((c) => (c.id === chat.id ? { ...c, archived: chat.archived } : c)), streaming: { ...s.streaming, [chat.id]: true } }));
       flushEarly(chat.leafId ?? "");
       return true;
     } catch (e) {
@@ -275,7 +318,7 @@ export const useStore = create<State>((set, get) => ({
     try {
       if (ref) st.pickModel(ref);
       const chat = await api.regenerate(st.current.id, messageId, model.providerId, model.model);
-      set((s) => ({ current: chat, streaming: { ...s.streaming, [chat.id]: true } }));
+      set((s) => ({ current: chat, chats: s.chats.map((c) => (c.id === chat.id ? { ...c, archived: chat.archived } : c)), streaming: { ...s.streaming, [chat.id]: true } }));
       flushEarly(chat.leafId ?? "");
     } catch (e) {
       st.toast(errorText(e));
@@ -322,6 +365,99 @@ export const useStore = create<State>((set, get) => ({
   async pinChat(id, pinned) {
     await api.pinChat(id, pinned);
     set((s) => ({ chats: sortChats(s.chats.map((c) => (c.id === id ? { ...c, pinned } : c))) }));
+  },
+
+  async archiveChat(id, archived) {
+    try {
+      await api.archiveChat(id, archived);
+      set((s) => ({
+        chats: s.chats.map((c) => (c.id === id ? { ...c, archived } : c)),
+        current: s.current?.id === id ? { ...s.current, archived } : s.current,
+        hits: s.hits?.map((h) => (h.chatId === id ? { ...h, archived } : h)) ?? null,
+      }));
+      if (archived) get().toast("Chat archived", { label: "Undo", run: () => void get().archiveChat(id, false) });
+    } catch (e) {
+      get().toast(errorText(e));
+    }
+  },
+
+  async attach(src) {
+    const key = get().currentId ?? "new";
+    const jobs: { key: string; name: string; add: () => Promise<Attachment> }[] = [];
+    for (const path of src.paths ?? []) {
+      jobs.push({ key: tempKey(), name: path.split(/[\\/]/).pop() || "file", add: () => api.attachPath(path) });
+    }
+    for (const f of src.files ?? []) {
+      // Screenshots paste as "image.png".
+      const name = !f.name || f.name === "image.png" ? `Pasted image.${f.type.split("/")[1] || "png"}` : f.name;
+      jobs.push({ key: tempKey(), name, add: async () => api.attachBytes(name, new Uint8Array(await f.arrayBuffer())) });
+    }
+    const room = MAX_FILES - (get().files[key]?.length ?? 0);
+    if (jobs.length > room) {
+      get().toast(`A message can carry ${MAX_FILES} files at most`);
+      jobs.splice(Math.max(0, room));
+    }
+    if (!jobs.length) return;
+    set((s) => ({ files: { ...s.files, [key]: [...(s.files[key] ?? []), ...jobs.map((j) => ({ key: j.key, name: j.name, ready: false }))] } }));
+    await Promise.all(
+      jobs.map(async (j) => {
+        try {
+          const a = await j.add();
+          patchFile(key, j.key, { attachment: a, name: a.name });
+          patchFile(key, j.key, { attachment: await prepare(a), ready: true });
+        } catch (e) {
+          dropFile(key, j.key);
+          get().toast(errorText(e));
+        }
+      }),
+    );
+  },
+
+  async attachVoice(wav, seconds) {
+    const key = get().currentId ?? "new";
+    const tmp = tempKey();
+    set((s) => ({ files: { ...s.files, [key]: [...(s.files[key] ?? []), { key: tmp, name: "Voice message", ready: false }] } }));
+    try {
+      const a = await api.attachBytes("Voice message.wav", wav, { voice: true, duration: seconds });
+      patchFile(key, tmp, { attachment: a, ready: true });
+    } catch (e) {
+      dropFile(key, tmp);
+      get().toast(errorText(e));
+    }
+  },
+
+  detach(fileKey) {
+    const key = get().currentId ?? "new";
+    const f = get().files[key]?.find((x) => x.key === fileKey);
+    dropFile(key, fileKey);
+    if (f?.attachment) void api.attachDiscard([f.attachment.id]).catch(() => {});
+  },
+
+  async openAttachment(id) {
+    try {
+      await api.attachOpen(id);
+    } catch (e) {
+      get().toast(errorText(e));
+    }
+  },
+
+  ensureCaps(ref) {
+    const key = `${ref.providerId}/${ref.model}`;
+    if (key in get().caps) return;
+    set((s) => ({ caps: { ...s.caps, [key]: null } }));
+    void api
+      .modelCaps(ref.providerId, ref.model)
+      .then((c) => set((s) => ({ caps: { ...s.caps, [key]: c } })))
+      .catch(() => {});
+  },
+
+  async setCap(ref, ability, on) {
+    try {
+      const c = await api.setModelCap(ref.providerId, ref.model, ability, on);
+      set((s) => ({ caps: { ...s.caps, [`${ref.providerId}/${ref.model}`]: c } }));
+    } catch (e) {
+      get().toast(errorText(e));
+    }
   },
 
   async deleteChat(id) {
@@ -490,6 +626,26 @@ export const useStore = create<State>((set, get) => ({
     set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
   },
 }));
+
+let tempSeq = 0;
+const tempKey = () => `f${++tempSeq}`;
+
+function patchFile(chatKey: string, fileKey: string, patch: Partial<DraftFile>) {
+  useStore.setState((s) => {
+    const list = s.files[chatKey];
+    if (!list?.some((f) => f.key === fileKey)) return {};
+    return { files: { ...s.files, [chatKey]: list.map((f) => (f.key === fileKey ? { ...f, ...patch } : f)) } };
+  });
+}
+
+function dropFile(chatKey: string, fileKey: string) {
+  useStore.setState((s) => {
+    const list = (s.files[chatKey] ?? []).filter((f) => f.key !== fileKey);
+    const files = { ...s.files, [chatKey]: list };
+    if (!list.length) delete files[chatKey];
+    return { files };
+  });
+}
 
 function flushEarly(messageId: string) {
   const list = early[messageId];

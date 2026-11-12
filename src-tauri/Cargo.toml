@@ -1,6 +1,6 @@
 [package]
 name = "relay"
-version = "0.4.0"
+version = "0.5.0"
 description = "Relay: a calm chat client for local and OpenAI-compatible models."
 edition = "2021"
 
@@ -30,5 +30,6 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 anyhow = "1"
 rand = "0.9"
 base64 = "0.22"
+pdf-extract = "0.12"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_Threading", "Win32_UI_HiDpi", "Win32_System_LibraryLoader", "Win32_Security", "Win32_Security_Credentials", "Win32_Storage_Xps", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_Time"] }

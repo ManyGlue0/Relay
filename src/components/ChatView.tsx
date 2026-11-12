@@ -1,5 +1,6 @@
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowDown, Plug } from "lucide-react";
+import { ArrowDown, Paperclip, Plug } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { reveal, rowSpring, spring } from "../lib/motion";
 import { useStore } from "../lib/store";
@@ -41,6 +42,7 @@ export function ChatView() {
             <Composer chatId={null} streaming={false} />
           </div>
         </motion.div>
+        <DropZone />
       </div>
     );
   }
@@ -51,7 +53,43 @@ export function ChatView() {
       <div className="dock">
         <Composer chatId={currentId} streaming={streaming} />
       </div>
+      <DropZone />
     </div>
+  );
+}
+
+/** Files dragged over the chat: a target, and they go to the composer when dropped. */
+function DropZone() {
+  const [over, setOver] = useState(false);
+  useEffect(() => {
+    const off = getCurrentWebview().onDragDropEvent((e) => {
+      const p = e.payload;
+      if (p.type === "enter") setOver(p.paths.length > 0);
+      else if (p.type === "leave") setOver(false);
+      else if (p.type === "drop") {
+        setOver(false);
+        if (p.paths.length) void useStore.getState().attach({ paths: p.paths });
+      }
+    });
+    return () => void off.then((un) => un());
+  }, []);
+  return (
+    <AnimatePresence>
+      {over && (
+        <motion.div
+          className="drop-zone"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0, transition: { duration: 0.12 } }}
+          transition={{ duration: 0.12 }}
+        >
+          <motion.div className="drop-card" initial={{ scale: 0.96 }} animate={{ scale: 1 }} transition={spring}>
+            <Paperclip size={20} />
+            <span>Drop to attach</span>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 }
 

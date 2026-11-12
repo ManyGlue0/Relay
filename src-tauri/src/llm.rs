@@ -9,6 +9,8 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
+use crate::db::Caps;
+
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -432,6 +434,96 @@ pub async fn detect_context(base: &str, key: Option<&str>, model: &str) -> Optio
         .and_then(|info| info.iter().find(|(k, _)| k.ends_with(".context_length")).and_then(|(_, v)| as_ctx(Some(v))))
 }
 
+// ---- what a model takes ---------------------------------------------------------------
+
+/// What `model` takes besides text, the ways servers tell: OpenRouter's model
+/// list (`architecture.input_modalities`), a `capabilities` list, llama.cpp's
+/// `/props` (`modalities`), LM Studio's `/api/v0/models` (`type: "vlm"`), and
+/// Ollama's `/api/show` (`capabilities`). What a server doesn't say comes from
+/// the name (`guess_caps`). None: no server said anything.
+pub async fn detect_caps(base: &str, key: Option<&str>, model: &str) -> Option<Caps> {
+    let guess = guess_caps(base, model);
+    let from_list = |list: &[Value]| -> Caps {
+        let has = |k: &str| list.iter().any(|x| x.as_str().is_some_and(|s| s.eq_ignore_ascii_case(k)));
+        let vision = has("image") || has("vision");
+        Caps { vision, audio: has("audio"), video: has("video") || (vision && guess.video), pdf: has("file") || guess.pdf }
+    };
+    if let Some(v) = model_list(base, key).await {
+        let list = v.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
+        if let Some(m) = list.iter().find(|m| m.get("id").and_then(Value::as_str) == Some(model)) {
+            if let Some(mods) = m.pointer("/architecture/input_modalities").and_then(Value::as_array) {
+                return Some(from_list(mods));
+            }
+            if let Some(caps) = m.get("capabilities").and_then(Value::as_array) {
+                return Some(from_list(caps));
+            }
+        }
+    }
+    let root = root_of(base);
+    if let Some(m) = get_json(format!("{root}/props"), key).await.and_then(|v| v.get("modalities").cloned()) {
+        let vision = m.get("vision").and_then(Value::as_bool).unwrap_or(false);
+        let audio = m.get("audio").and_then(Value::as_bool).unwrap_or(false);
+        return Some(Caps { vision, audio, video: vision && guess.video, pdf: guess.pdf });
+    }
+    if let Some(kind) = get_json(format!("{root}/api/v0/models/{model}"), key).await.and_then(|v| v.get("type").and_then(Value::as_str).map(str::to_string)) {
+        let vision = kind == "vlm";
+        return Some(Caps { vision, audio: guess.audio, video: vision && guess.video, pdf: guess.pdf });
+    }
+    let mut show = client().post(format!("{root}/api/show")).timeout(Duration::from_secs(4)).json(&json!({ "model": model }));
+    if let Some(k) = key.filter(|k| !k.is_empty()) {
+        show = show.bearer_auth(k);
+    }
+    if let Ok(r) = show.send().await {
+        if r.status().is_success() {
+            if let Some(caps) = r.json::<Value>().await.ok().and_then(|v| v.get("capabilities").and_then(Value::as_array).cloned()) {
+                return Some(from_list(&caps));
+            }
+        }
+    }
+    None
+}
+
+/// The server's full model list, kept for a minute: asking about every model
+/// of a big list (OpenRouter's) shouldn't fetch it each time.
+async fn model_list(base: &str, key: Option<&str>) -> Option<Value> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::Instant;
+    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, Value)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let url = format!("{}/models", normalize_base(base));
+    if let Some((at, v)) = cache.lock().unwrap().get(&url) {
+        if at.elapsed() < Duration::from_secs(60) {
+            return Some(v.clone());
+        }
+    }
+    let v = get_json(url.clone(), key).await?;
+    cache.lock().unwrap().insert(url, (Instant::now(), v.clone()));
+    Some(v)
+}
+
+/// What a model's name (and its server) suggests it takes, for servers that
+/// don't say. The user can correct it per model.
+pub fn guess_caps(base: &str, model: &str) -> Caps {
+    let m = model.to_lowercase();
+    let name = m.rsplit('/').next().unwrap_or(&m);
+    let host = normalize_base(base).to_lowercase();
+    let any = |words: &[&str]| words.iter().any(|w| m.contains(w));
+    let hosted = any(&["gpt-4o", "gpt-4.1", "gpt-5", "chatgpt-4o", "claude", "gemini", "grok-4", "grok-2-vision", "grok-vision", "llama-4", "pixtral", "mistral-medium", "mistral-small-3"])
+        || name.starts_with("o3")
+        || name.starts_with("o4");
+    let vision = hosted
+        || any(&[
+            "vision", "-vl", "_vl", "vl-", "llava", "moondream", "minicpm-v", "gemma-3", "gemma3", "internvl", "cogvlm", "glm-4v", "glm-4.1v",
+            "glm-4.5v", "omni", "smolvlm", "paligemma", "molmo", "multimodal", "kimi-vl", "ovis", "-vlm",
+        ]);
+    let audio = any(&["audio", "omni", "voxtral", "gemma-3n", "gemma3n", "ultravox", "phi-4-multimodal", "gemini"]);
+    let video = any(&["gemini", "qwen2-vl", "qwen2.5-vl", "qwen3-vl", "omni", "video", "internvl", "llava-onevision", "minicpm-v"]);
+    // OpenRouter reads PDFs for every model; OpenAI for its vision models.
+    let pdf = host.contains("openrouter.ai") || (host.contains("api.openai.com") && vision);
+    Caps { vision, audio, video, pdf }
+}
+
 // ---- <think> tags ------------------------------------------------------------------
 
 /// Many local models (Qwen, DeepSeek R1 distills…) put their reasoning inline
@@ -509,6 +601,20 @@ impl ThinkSplitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guesses_what_models_take() {
+        let local = "http://localhost:1234/v1";
+        assert!(guess_caps(local, "lfm3-vl-2b").vision);
+        assert!(!guess_caps(local, "qwen3-8b").vision);
+        let omni = guess_caps(local, "Qwen2.5-Omni-7B");
+        assert!(omni.vision && omni.audio && omni.video);
+        assert!(guess_caps(local, "voxtral-mini").audio);
+        assert!(guess_caps("https://openrouter.ai/api/v1", "meta-llama/llama-3.1-8b").pdf);
+        assert!(guess_caps("https://api.openai.com/v1", "gpt-4o-mini").pdf);
+        assert!(guess_caps("https://api.openai.com/v1", "o3").vision);
+        assert!(!guess_caps(local, "deepseek-r1-distill-qwen3").vision);
+    }
 
     fn run(pieces: &[&str]) -> (String, String) {
         let mut s = ThinkSplitter::default();

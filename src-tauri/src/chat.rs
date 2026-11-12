@@ -17,7 +17,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::db::{Message, Preset, Provider};
+use crate::attachments::{self, Attachment};
+use crate::db::{Caps, Message, Preset, Provider};
 use crate::llm::{self, End, Event, ThinkSplitter};
 use crate::skills::{self, Skill};
 use crate::Core;
@@ -209,14 +210,31 @@ pub fn provisional_title(text: &str) -> String {
     out
 }
 
+/// The files the composer attached, by id.
+fn load_files(core: &Core, ids: &[String]) -> Result<Vec<Attachment>, String> {
+    let root = attachments::root(&core.data_dir);
+    ids.iter().map(|id| attachments::load(&root, id)).collect()
+}
+
+/// A message's text for titles: what was typed, or else what was attached.
+fn title_source(text: &str, files: &[Attachment]) -> String {
+    match (text.trim().is_empty(), files.is_empty()) {
+        (_, true) => text.to_string(),
+        (true, false) => attachments::describe(files),
+        (false, false) => format!("{text}\n[Attached: {}]", attachments::describe(files)),
+    }
+}
+
 /// Adds the user's message to the end of the chat and starts the reply.
-pub fn send(app: &AppHandle, chat_id: &str, text: &str, provider_id: &str, model: &str) -> Result<Sent, String> {
+pub fn send(app: &AppHandle, chat_id: &str, text: &str, files: &[String], provider_id: &str, model: &str) -> Result<Sent, String> {
     let core = core(app);
     let chat = core.db.chat(chat_id)?.ok_or("That chat no longer exists")?;
+    let files = load_files(&core, files)?;
     core.db.set_chat_model(chat_id, provider_id, model)?;
-    let user = core.db.add_message(chat_id, chat.leaf_id.as_deref(), "user", text, None, None, "done")?;
+    let user = core.db.add_message(chat_id, chat.leaf_id.as_deref(), "user", text, &files, None, None, "done")?;
     if chat.summary.title.is_empty() {
-        core.db.set_title(chat_id, &provisional_title(text), true)?;
+        let source = if text.trim().is_empty() { attachments::describe(&files) } else { text.to_string() };
+        core.db.set_title(chat_id, &provisional_title(&source), true)?;
     }
     let assistant = start_reply(app, chat_id, &user.id, provider_id, model)?;
     crate::holster::publish(app);
@@ -224,15 +242,17 @@ pub fn send(app: &AppHandle, chat_id: &str, text: &str, provider_id: &str, model
 }
 
 /// An edited user message: a new branch beside the original, with a new reply.
-pub fn edit(app: &AppHandle, chat_id: &str, message_id: &str, text: &str, provider_id: &str, model: &str) -> Result<Sent, String> {
+/// `files`: the attachments the edited message keeps (ids of the original's).
+pub fn edit(app: &AppHandle, chat_id: &str, message_id: &str, text: &str, files: &[String], provider_id: &str, model: &str) -> Result<Sent, String> {
     let core = core(app);
     let original = core.db.message(message_id)?.ok_or("That message no longer exists")?;
     if original.role != "user" || original.chat_id != chat_id {
         return Err("Only your own messages can be edited".into());
     }
+    let kept: Vec<Attachment> = original.attachments.iter().filter(|a| files.contains(&a.id)).cloned().collect();
     core.streams.stop_chat(chat_id);
     core.db.set_chat_model(chat_id, provider_id, model)?;
-    let user = core.db.add_message(chat_id, original.parent_id.as_deref(), "user", text, None, None, "done")?;
+    let user = core.db.add_message(chat_id, original.parent_id.as_deref(), "user", text, &kept, None, None, "done")?;
     let assistant = start_reply(app, chat_id, &user.id, provider_id, model)?;
     crate::holster::publish(app);
     Ok(Sent { user: Some(user), assistant })
@@ -324,15 +344,61 @@ pub fn system_prompt(core: &Core, preset: Option<&Preset>, chat_prompt: &str) ->
     blocks.join("\n\n")
 }
 
+/// Where attachments are, and what the model takes of them.
+struct Files {
+    root: std::path::PathBuf,
+    caps: Caps,
+}
+
+/// What `model` takes besides text: what was detected (or, before that, what
+/// its name suggests), with the user's word over it.
+pub fn caps_for(p: &Provider, model: &str) -> Caps {
+    p.caps.get(model).copied().unwrap_or_else(|| llm::guess_caps(&p.base_url, model)).with_user(p.caps_user.get(model))
+}
+
 /// How stored messages become the API's.
 #[derive(Clone, Copy, Default)]
-struct History {
+struct History<'a> {
     /// Tool calls as tool messages (else summarized as text).
     tools: bool,
     /// Reasoning as `reasoning_content`.
     reasoning: bool,
     /// User messages start with when they were sent.
     stamps: bool,
+    /// Attachments go as themselves; None: named in words only.
+    files: Option<&'a Files>,
+}
+
+fn text_part(t: impl Into<String>) -> Value {
+    json!({ "type": "text", "text": t.into() })
+}
+
+/// A user message for the API. Without files it's the same string it always
+/// was (so earlier messages never change, and the prompt cache holds). With
+/// files: the time, the files, then the text.
+fn user_message(m: &Message, opts: History) -> Value {
+    let content = if opts.stamps { stamped(m) } else { m.content.clone() };
+    if m.attachments.is_empty() {
+        return json!({ "role": "user", "content": content });
+    }
+    let mut parts = Vec::new();
+    let when = if opts.stamps { local_time(m.created_at) } else { String::new() };
+    if !when.is_empty() {
+        parts.push(text_part(format!("[{when}]")));
+    }
+    match opts.files {
+        Some(f) => parts.extend(attachments::content_parts(&f.root, &m.attachments, f.caps)),
+        None => parts.push(text_part(format!("[Attached: {}]", attachments::describe(&m.attachments)))),
+    }
+    if !m.content.trim().is_empty() {
+        parts.push(text_part(m.content.clone()));
+    }
+    // Only text (text files, documents): one string, which every server takes.
+    if parts.iter().all(|p| p["type"] == "text") {
+        let joined = parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n\n");
+        return json!({ "role": "user", "content": joined });
+    }
+    json!({ "role": "user", "content": parts })
 }
 
 /// An assistant message, with its reasoning as `reasoning_content` when there is some.
@@ -349,12 +415,11 @@ fn assistant_message(content: Value, reasoning: &str) -> Value {
 /// without tool definitions). With `reasoning`, each assistant message carries
 /// the thinking that led to it (the server's template decides what to keep).
 fn history_messages(history: &[Message], opts: History) -> Vec<Value> {
-    let History { tools, reasoning, stamps } = opts;
+    let History { tools, reasoning, .. } = opts;
     let mut out = Vec::new();
     for m in history {
         if m.role == "user" {
-            let content = if stamps { stamped(m) } else { m.content.clone() };
-            out.push(json!({ "role": "user", "content": content }));
+            out.push(user_message(m, opts));
             continue;
         }
         if m.role != "assistant" {
@@ -486,6 +551,10 @@ pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &s
     let core = core(app);
     let provider = core.db.provider(provider_id)?.ok_or("That provider was removed. Pick another model.")?;
     let chat = core.db.chat(chat_id)?.ok_or("That chat no longer exists")?;
+    // A new reply (sent, edited or asked again) brings an archived chat back.
+    if chat.summary.archived {
+        core.db.set_archived(chat_id, false)?;
+    }
     let history = core.db.path_to(parent)?;
     let settings = core.prefs.get();
     let preset = chat.summary.preset_id.as_deref().and_then(|id| core.db.preset(id).ok().flatten());
@@ -510,7 +579,8 @@ pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &s
     if !system.is_empty() {
         messages.push(json!({ "role": "system", "content": system }));
     }
-    let opts = History { tools: !specs.is_empty(), reasoning: settings.send_reasoning, stamps: settings.share_date };
+    let files = Files { root: attachments::root(&core.data_dir), caps: caps_for(&provider, model) };
+    let opts = History { tools: !specs.is_empty(), reasoning: settings.send_reasoning, stamps: settings.share_date, files: Some(&files) };
     messages.extend(history_messages(&history, opts));
 
     let mut body = json!({ "model": model });
@@ -530,9 +600,9 @@ pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &s
     // The first exchange names the chat (unless the user named it already).
     let users: Vec<&Message> = history.iter().filter(|m| m.role == "user").collect();
     let title = if users.len() == 1 { title_plan(&core, chat_id, &provider, model) } else { None };
-    let first_user = users.first().map(|m| m.content.clone()).unwrap_or_default();
+    let first_user = users.first().map(|m| title_source(&m.content, &m.attachments)).unwrap_or_default();
 
-    let assistant = core.db.add_message(chat_id, Some(parent), "assistant", "", Some(provider_id), Some(model), "streaming")?;
+    let assistant = core.db.add_message(chat_id, Some(parent), "assistant", "", &[], Some(provider_id), Some(model), "streaming")?;
     let token = core.streams.start(&assistant.id, chat_id);
     let job = Job {
         app: app.clone(),
@@ -1118,6 +1188,7 @@ mod tests {
             error: None,
             stats: None,
             created_at: 0,
+            attachments: vec![],
             seq: 0,
             siblings: vec![],
         }
@@ -1139,6 +1210,7 @@ mod tests {
             error: None,
             stats: None,
             created_at: 0,
+            attachments: vec![],
             seq: 0,
             siblings: vec![],
         };
@@ -1175,7 +1247,7 @@ mod tests {
         let mut old = msg("assistant", "Hi.", None);
         old.reasoning = "greet".into();
         let h = vec![msg("user", "hi", None), old, msg("user", "read it", None), a];
-        let out = history_messages(&h, History { tools: true, reasoning: true, stamps: false });
+        let out = history_messages(&h, History { tools: true, reasoning: true, ..Default::default() });
         assert_eq!(out[1]["reasoning_content"], "greet");
         assert_eq!(out[3]["reasoning_content"], "plan");
         assert_eq!(out[3]["tool_calls"][0]["id"], "c1");
@@ -1211,5 +1283,34 @@ mod tests {
         // The same message reads the same on every request.
         assert_eq!(a, history_messages(&h, opts));
         assert_eq!(history_messages(&h, History::default())[0]["content"], "hello");
+    }
+
+    #[test]
+    fn user_files_go_with_the_message() {
+        let dir = std::env::temp_dir().join(format!("relay-chat-{}", crate::db::new_id()));
+        let root = attachments::root(&dir);
+        let note = attachments::add_bytes(&root, "note.md", b"# Plan", false, None).unwrap();
+        let png = attachments::add_bytes(&root, "dot.png", b"\x89PNG\r\n\x1a\n", false, None).unwrap();
+        let files = Files { root: root.clone(), caps: Caps { vision: true, ..Default::default() } };
+        let opts = History { files: Some(&files), ..Default::default() };
+
+        // Only text files: still one string.
+        let mut u = msg("user", "Summarize", None);
+        u.attachments = vec![note.clone()];
+        let out = history_messages(&[u.clone()], opts);
+        assert_eq!(out[0]["content"], "<file name=\"note.md\">\n# Plan\n</file>\n\nSummarize");
+
+        // An image: parts, the file before the text.
+        u.attachments = vec![png, note];
+        let out = history_messages(&[u.clone()], opts);
+        let parts = out[0]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "image_url");
+        assert!(parts[0]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,"));
+        assert_eq!(parts[2]["text"], "Summarize");
+
+        // Without the folder (tests, titles): named only.
+        let named = history_messages(&[u], History::default());
+        assert_eq!(named[0]["content"], "[Attached: dot.png, note.md]\n\nSummarize");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

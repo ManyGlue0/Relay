@@ -1,6 +1,6 @@
-import { ChevronLeft, ChevronRight, CircleAlert, CircleCheck, Eye, EyeOff, KeyRound, Loader, Plug, Plus, Search, Trash2, X } from "lucide-react";
-import { useState } from "react";
-import { api, EFFORTS, effortOf, errorText, type Provider } from "../../lib/api";
+import { AudioLines, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, Eye, EyeOff, FileText, Film, Image, KeyRound, Loader, Plug, Plus, Search, Trash2, X, type LucideIcon } from "lucide-react";
+import { useEffect, useState } from "react";
+import { api, EFFORTS, effortOf, errorText, type Ability, type Provider } from "../../lib/api";
 import { compact, providerModels, shortModel, useStore } from "../../lib/store";
 import { ModelPicker } from "../ModelPicker";
 import { IconGlyph, IconPicker, ProviderIcon, autoIcon, iconOf } from "../ProviderIcon";
@@ -345,6 +345,7 @@ function ProviderEditor({ provider }: { provider: Provider | null }) {
           </Button>
         </Row>
       </Group>
+      {provider && <Abilities providerId={provider.id} models={allModels.filter((m) => showAll || custom.includes(m))} />}
       {allModels.some((m) => provider?.contexts[m]) && (
         <p className="set-note">
           Detected so far:{" "}
@@ -383,6 +384,73 @@ function ProviderEditor({ provider }: { provider: Provider | null }) {
         </Button>
       </div>
     </Page>
+  );
+}
+
+const ABILITIES: { key: Ability; label: string; icon: LucideIcon; what: string }[] = [
+  { key: "vision", label: "Images", icon: Image, what: "sees images" },
+  { key: "audio", label: "Audio", icon: AudioLines, what: "hears audio" },
+  { key: "video", label: "Video", icon: Film, what: "watches video (else it gets stills)" },
+  { key: "pdf", label: "PDFs", icon: FileText, what: "reads PDFs as files (else it gets their text)" },
+];
+/** Rows shown before the list needs a search. */
+const ABILITY_ROWS = 12;
+
+/** What each model takes besides text: detected (or guessed), and the user can correct it. */
+function Abilities({ providerId, models }: { providerId: string; models: string[] }) {
+  const [find, setFind] = useState("");
+  const q = find.trim().toLowerCase();
+  const shown = models.filter((m) => !q || m.toLowerCase().includes(q)).slice(0, ABILITY_ROWS);
+  const key = shown.join("|");
+  useEffect(() => {
+    for (const model of shown) useStore.getState().ensureCaps({ providerId, model });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providerId, key]);
+  if (!models.length) return null;
+  return (
+    <Group title="What each model takes" hint="Detected from the server where it says, else guessed from the name. Click to correct it.">
+      {models.length > ABILITY_ROWS && (
+        <div className="model-find">
+          <Search size={14} />
+          <input value={find} placeholder={`Find among ${models.length} models`} spellCheck={false} onChange={(e) => setFind(e.target.value)} />
+        </div>
+      )}
+      {shown.map((m) => (
+        <AbilityRow key={m} providerId={providerId} model={m} />
+      ))}
+    </Group>
+  );
+}
+
+function AbilityRow({ providerId, model }: { providerId: string; model: string }) {
+  const c = useStore((s) => s.caps[`${providerId}/${model}`]);
+  const changed = !!c && Object.keys(c.user).length > 0;
+  return (
+    <Row label={<span className="mono-label">{shortModel(model)}</span>} hint={changed ? "Changed by you" : undefined}>
+      <div className="abilities">
+        {ABILITIES.map(({ key, label, icon: Icon, what }) => {
+          const on = c?.caps[key] ?? false;
+          const mine = c?.user[key] !== undefined;
+          return (
+            <button
+              key={key}
+              className={`ability ${on ? "on" : ""} ${mine ? "mine" : ""}`}
+              aria-pressed={on}
+              disabled={!c}
+              title={`${on ? "It" : "Not detected: it"} ${what}${mine ? " (you set this)" : ""}`}
+              onClick={() => {
+                if (!c) return;
+                // Back to what was detected, or the user's word against it.
+                void useStore.getState().setCap({ providerId, model }, key, !on === c.detected[key] ? null : !on);
+              }}
+            >
+              <Icon size={13} />
+              {label}
+            </button>
+          );
+        })}
+      </div>
+    </Row>
   );
 }
 

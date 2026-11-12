@@ -25,6 +25,8 @@
 ## Highlights
 
 - **Any OpenAI-compatible endpoint.** Ollama, LM Studio, llama.cpp, vLLM, OpenAI, OpenRouter, or your own server. Add it once with its address, test the connection, and its models show up in the picker. A server with more models than you want (LM Studio) can show only the ones you pick. Each provider shows its service's logo, or an icon or image you choose.
+- **Files, pictures, sound and video.** Attach with the paperclip, drop files on the chat, or paste a screenshot. Each model gets everything it can take: images as images, audio as audio, video whole to models that watch video (else as stills, plus its sound for models that hear), PDFs as files where the server reads them (else their text), and Word, PowerPoint, code and text files as text. Relay knows what each model takes where the server says (LM Studio, Ollama, llama.cpp, OpenRouter) or from its name, warns before you send something it may not take, and lets you correct it per model.
+- **Voice messages.** Press the mic, talk, press it again: the recording goes to the model as audio, so a model that hears gets your voice itself, not a transcript.
 - **Knows what's online.** The model picker checks your servers each time it opens: models that can't answer right now wait in a folded *Offline* section, and new models on a server appear by themselves.
 - **Tools through MCP.** Add MCP servers by command (`npx`, `uvx`, anything) or by address (Streamable HTTP), or import a Claude Desktop config. Relay asks before every tool call (*Allow once*, *Always allow*, *Deny*), and each tool can be set to Ask, Allow or Off.
 - **Skills.** Folders of instructions, references and scripts in the Agent Skills format (`SKILL.md`). Models see each skill's name and description and load the rest when a task calls for it; scripts run only after you say yes (or once you trust that skill).
@@ -36,7 +38,7 @@
 - **Reasoning, shown calmly.** Thinking models (`reasoning_content`, `reasoning`, or inline `<think>` tags) get a folding "Thought for 12 s" section. Their thinking goes back to the model with earlier replies and tool calls (as `reasoning_content`), so it keeps its train of thought; turn that off in Settings → Models. A server that refuses the field gets the chat without it.
 - **Rich answers.** Markdown, tables, syntax-highlighted code with one-click copy, and LaTeX math.
 - **Stats.** Speed, tokens and time to first token under every reply; a context meter in the composer; and a Stats page with tokens per day and a table per model.
-- **History and search.** Every chat is kept locally and searchable by title and content. Pin the ones you come back to. New chats get a short title from the chat's model or one you choose (a small, fast one is plenty).
+- **History and search.** Every chat is kept locally and searchable by title and content. Pin the ones you come back to; archive the ones you're done with (they wait in a folded *Archived* group, still searchable, and come back when you write in them). New chats get a short title from the chat's model or one you choose (a small, fast one is plenty).
 - **Kind to your server's cache.** Nothing in a request changes from one message to the next except the new part: the system prompt stays put, each message carries its own time, and a title made on the same server comes before the reply. Local servers reuse their prompt cache instead of reading the whole chat again.
 - **Holster-native.** Hover Relay's tile in [Holster](https://github.com/ManyGlue0/Holster) to see your latest chats; click one to jump in. When a reply finishes while Relay is in the background, a notification tells you.
 
@@ -112,10 +114,12 @@ A skill teaches models one kind of task. It's a folder with a `SKILL.md` (a `nam
 | `Ctrl+B` | Show or hide the sidebar |
 | `Ctrl+,` | Settings |
 | Double-click your message | Edit it |
+| `Ctrl+V` in the message box | Paste a copied image or file |
 
 ## Privacy
 
-- Everything stays on your computer: chats live in a SQLite database in `%APPDATA%\app.relay.desktop\`.
+- Everything stays on your computer: chats live in a SQLite database in `%APPDATA%\app.relay.desktop\`, and attached files in its `attachments` folder (removed when their chat is deleted).
+- The microphone is only on while you record a voice message. Windows' microphone setting decides whether Relay may use it.
 - API keys are stored in **Windows Credential Manager** (as `Relay/provider/…`), never in Relay's files.
 - Relay only talks to the endpoints you add, plus Holster on `127.0.0.1`. Remote images in replies are shown as links, not fetched.
 

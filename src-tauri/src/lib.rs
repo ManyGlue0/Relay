@@ -1,3 +1,4 @@
+mod attachments;
 mod chat;
 mod commands;
 mod db;
@@ -92,6 +93,11 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// `relay.exe --pdf-text <pdf> <out>`: reads a PDF's text in its own process (see attachments.rs).
+pub fn pdf_text_main(pdf: &str, out: &str) {
+    attachments::pdf_text_main(pdf, out);
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| window::show(app)))
@@ -99,6 +105,24 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(update::Pending::default())
+        // The microphone is for voice messages: Relay's own page asks only when
+        // the mic button is pressed (Windows' privacy setting still applies).
+        .on_permission_request(|_, kind| match kind {
+            tauri::webview::PermissionKind::Microphone => tauri::webview::PermissionResponse::Allow,
+            _ => tauri::webview::PermissionResponse::Default,
+        })
+        // Attachments, for the UI: http://relay.localhost/<id>/<file>.
+        .register_asynchronous_uri_scheme_protocol("relay", |ctx, request, responder| {
+            let root = ctx.app_handle().path().app_data_dir().map(|d| attachments::root(&d));
+            std::thread::spawn(move || {
+                let range = request.headers().get("range").and_then(|v| v.to_str().ok()).map(str::to_string);
+                let response = match root {
+                    Ok(root) => attachments::serve(&root, request.uri().path(), range.as_deref()),
+                    Err(_) => tauri::http::Response::builder().status(404).body(Vec::new()).unwrap(),
+                };
+                responder.respond(response);
+            });
+        })
         .setup(|app| {
             let handle = app.handle().clone();
             // Release builds carry the updater's public key; local builds don't update.
@@ -119,6 +143,13 @@ pub fn run() {
                 data_dir: data_dir.clone(),
             });
             app.manage(core.clone());
+            // Files no message holds any more (and not just attached in the composer).
+            let gc = core.clone();
+            std::thread::spawn(move || {
+                if let Ok(keep) = gc.db.attachment_ids(None) {
+                    attachments::collect(&attachments::root(&gc.data_dir), &keep, std::time::Duration::from_secs(24 * 3600));
+                }
+            });
             for server in core.db.mcp_servers().unwrap_or_default() {
                 core.mcp.connect(server);
             }
@@ -169,6 +200,14 @@ pub fn run() {
             commands::provider_test,
             commands::provider_refresh,
             commands::model_context,
+            commands::model_caps,
+            commands::model_caps_set,
+            commands::attach_path,
+            commands::attach_bytes,
+            commands::attach_put,
+            commands::attach_info,
+            commands::attach_discard,
+            commands::attach_open,
             commands::presets_list,
             commands::preset_save,
             commands::preset_delete,
@@ -192,6 +231,7 @@ pub fn run() {
             commands::chat_get,
             commands::chat_rename,
             commands::chat_pin,
+            commands::chat_archive,
             commands::chat_delete,
             commands::chats_delete_all,
             commands::chat_set_model,

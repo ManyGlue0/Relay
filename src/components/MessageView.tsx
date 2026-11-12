@@ -24,6 +24,7 @@ import { partsOf, SKILLS_SERVER, type Message, type Part } from "../lib/api";
 import { spring } from "../lib/motion";
 import { shortModel, useActiveModel, useStore } from "../lib/store";
 import { fullTime, seconds, sentAgo, useNow } from "../lib/time";
+import { MessageFiles } from "./Attachments";
 import { wantsSend } from "./Composer";
 import { Markdown } from "./Markdown";
 import { ModelMenu } from "./ModelPicker";
@@ -36,14 +37,18 @@ export const MessageView = memo(function MessageView({ message, busy }: { messag
 function UserMessage({ message, busy }: { message: Message; busy: boolean }) {
   const [editing, setEditing] = useState(false);
   if (editing) return <EditBox message={message} onDone={() => setEditing(false)} />;
+  const files = message.attachments ?? [];
   return (
     <div className="msg msg-user">
-      <div className="bubble" onDoubleClick={() => !busy && setEditing(true)}>
-        {message.content}
-      </div>
+      {files.length > 0 && <MessageFiles files={files} />}
+      {message.content && (
+        <div className="bubble" onDoubleClick={() => !busy && setEditing(true)}>
+          {message.content}
+        </div>
+      )}
       <div className="msg-actions">
         <Branches message={message} disabled={busy} />
-        <CopyButton text={message.content} />
+        {message.content && <CopyButton text={message.content} />}
         <IconButton size="tiny" label="Edit" disabled={busy} onClick={() => setEditing(true)}>
           <Pencil size={13} />
         </IconButton>
@@ -54,18 +59,25 @@ function UserMessage({ message, busy }: { message: Message; busy: boolean }) {
 
 function EditBox({ message, onDone }: { message: Message; onDone: () => void }) {
   const [text, setText] = useState(message.content);
+  const [kept, setKept] = useState(() => message.attachments ?? []);
   const sendKey = useStore((s) => s.settings?.sendKey ?? "enter");
   const [saving, setSaving] = useState(false);
+  const empty = !text.trim() && kept.length === 0;
   const submit = async () => {
-    if (!text.trim() || saving) return;
-    if (text.trim() === message.content.trim()) return onDone();
+    if (empty || saving) return;
+    if (text.trim() === message.content.trim() && kept.length === (message.attachments?.length ?? 0)) return onDone();
     setSaving(true);
-    const ok = await useStore.getState().edit(message.id, text);
+    const ok = await useStore.getState().edit(
+      message.id,
+      text,
+      kept.map((a) => a.id),
+    );
     setSaving(false);
     if (ok) onDone();
   };
   return (
     <motion.div className="msg msg-user editing" initial={{ opacity: 0.6, scale: 0.99 }} animate={{ opacity: 1, scale: 1 }} transition={spring}>
+      {kept.length > 0 && <MessageFiles files={kept} onRemove={(id) => setKept((k) => k.filter((a) => a.id !== id))} />}
       <div className="edit-box">
         <AutoText
           value={text}
@@ -88,7 +100,7 @@ function EditBox({ message, onDone }: { message: Message; onDone: () => void }) 
           <Button variant="ghost" onClick={onDone}>
             Cancel
           </Button>
-          <Button variant="primary" onClick={() => void submit()} disabled={!text.trim() || saving}>
+          <Button variant="primary" onClick={() => void submit()} disabled={empty || saving}>
             Send
           </Button>
         </div>

@@ -11,6 +11,7 @@ import {
   CircleSlash,
   Copy,
   FileText,
+  Globe,
   Loader,
   Pencil,
   RefreshCw,
@@ -20,7 +21,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
-import { partsOf, SKILLS_SERVER, type Message, type Part } from "../lib/api";
+import { HOSTED_SERVER, partsOf, SKILLS_SERVER, WEB_SERVER, type Message, type Part } from "../lib/api";
 import { spring } from "../lib/motion";
 import { shortModel, useActiveModel, useStore } from "../lib/store";
 import { fullTime, seconds, sentAgo, useNow } from "../lib/time";
@@ -293,7 +294,6 @@ type ToolPart = Extract<Part, { type: "tool" }>;
 /** How a tool call reads on its card. The built-in skill tools read as what
  *  they do ("pdf · Skill", "scripts/fill.py · pdf"); MCP tools as tool and server. */
 function toolFace(part: ToolPart): { icon: React.ReactNode; name: string; server: string; ask: string } {
-  if (part.serverId !== SKILLS_SERVER) return { icon: <Wrench size={13} />, name: part.tool, server: part.server, ask: "Let the model run this tool?" };
   let a: Record<string, unknown> = {};
   try {
     a = JSON.parse(part.arguments) as Record<string, unknown>;
@@ -301,6 +301,12 @@ function toolFace(part: ToolPart): { icon: React.ReactNode; name: string; server
     /* half-written arguments */
   }
   const str = (k: string) => (typeof a[k] === "string" ? (a[k] as string) : "");
+  // Web search, Relay's own or the server's (Anthropic's): the query, or the page.
+  if (part.serverId === WEB_SERVER || part.serverId === HOSTED_SERVER) {
+    if (part.tool === "search" || part.tool === "web_search") return { icon: <Globe size={13} />, name: str("query") || "Searching", server: "Web search", ask: "" };
+    if (part.tool === "fetch" || part.tool === "web_fetch") return { icon: <Globe size={13} />, name: str("url") || "Reading a page", server: "Web page", ask: "" };
+  }
+  if (part.serverId !== SKILLS_SERVER) return { icon: <Wrench size={13} />, name: part.tool, server: part.server, ask: "Let the model run this tool?" };
   switch (part.tool) {
     case "load":
       return { icon: <BookMarked size={13} />, name: str("name") || "Skill", server: "Skill", ask: "" };

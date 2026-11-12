@@ -11,6 +11,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::Caps;
 
+/// The shared HTTP client (for `anthropic`).
+pub(crate) fn http() -> &'static reqwest::Client {
+    client()
+}
+
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -31,7 +36,7 @@ fn request(method: reqwest::Method, base: &str, path: &str, key: Option<&str>) -
     if let Some(key) = key.filter(|k| !k.is_empty()) {
         req = req.bearer_auth(key);
         if normalize_base(base).contains("api.anthropic.com") {
-            req = req.header("x-api-key", key).header("anthropic-version", "2023-06-01");
+            req = req.header("x-api-key", key).header("anthropic-version", crate::anthropic::VERSION);
         }
     }
     req
@@ -39,7 +44,7 @@ fn request(method: reqwest::Method, base: &str, path: &str, key: Option<&str>) -
 
 /// A readable reason from a failed response: the API's own message when it
 /// sent one, else the status.
-async fn failure(resp: reqwest::Response) -> String {
+pub(crate) async fn failure(resp: reqwest::Response) -> String {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     let message = serde_json::from_str::<Value>(&body).ok().and_then(|v| {
@@ -58,7 +63,7 @@ async fn failure(resp: reqwest::Response) -> String {
     }
 }
 
-fn connect_error(e: reqwest::Error, base: &str) -> String {
+pub(crate) fn connect_error(e: reqwest::Error, base: &str) -> String {
     if e.is_connect() {
         format!("Couldn't reach {}. Is the server running?", normalize_base(base))
     } else if e.is_timeout() {
@@ -125,6 +130,26 @@ pub enum Event {
     ToolCall { index: usize, id: Option<String>, name: Option<String>, arguments: String },
     Usage { prompt: u64, completion: u64 },
     Finish(String),
+    /// The reply's blocks as an Anthropic server sent them (at the end).
+    Native(Vec<Value>),
+    /// One of the server's own tools (Anthropic's web search): its call, then
+    /// its input, then its result (text, failed).
+    Hosted { id: String, name: String, input: Option<String>, result: Option<(String, bool)> },
+}
+
+/// Removes Relay's own keys (`_effort`, `_native`, …) before a request goes
+/// to an OpenAI-compatible server.
+fn strip_private(body: &mut Value) {
+    if let Some(obj) = body.as_object_mut() {
+        obj.retain(|k, _| !k.starts_with('_'));
+    }
+    if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+        for m in messages {
+            if let Some(obj) = m.as_object_mut() {
+                obj.retain(|k, _| !k.starts_with('_'));
+            }
+        }
+    }
 }
 
 pub enum End {
@@ -179,7 +204,7 @@ enum Lesson {
     Plain,
 }
 
-fn is_rejection(status: reqwest::StatusCode) -> bool {
+pub(crate) fn is_rejection(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::BAD_REQUEST || status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
 }
 
@@ -196,13 +221,20 @@ fn lower_effort(body: &mut Value) -> bool {
 }
 
 /// Streams one chat completion, calling `on` for each piece as it arrives.
+/// Streams a reply in the provider's protocol: `api` is "anthropic" for the
+/// Messages API, else Chat Completions.
 pub async fn stream_chat(
+    api: &str,
     base: &str,
     key: Option<&str>,
     mut body: Value,
     cancel: &CancellationToken,
     mut on: impl FnMut(Event),
 ) -> Result<End, String> {
+    if api == "anthropic" {
+        return crate::anthropic::stream_chat(base, key, body, cancel, on).await;
+    }
+    strip_private(&mut body);
     body["stream"] = json!(true);
     body["stream_options"] = json!({ "include_usage": true });
     let memo = format!("{}|{}", normalize_base(base), body.get("model").and_then(Value::as_str).unwrap_or(""));
@@ -347,7 +379,11 @@ fn parse_line(line: &str, on: &mut impl FnMut(Event)) -> Result<bool, String> {
 }
 
 /// One non-streaming completion, for small jobs like titles.
-pub async fn complete(base: &str, key: Option<&str>, body: Value) -> Result<String, String> {
+pub async fn complete(api: &str, base: &str, key: Option<&str>, mut body: Value) -> Result<String, String> {
+    if api == "anthropic" {
+        return crate::anthropic::complete(base, key, body).await;
+    }
+    strip_private(&mut body);
     let resp = request(reqwest::Method::POST, base, "/chat/completions", key)
         .timeout(Duration::from_secs(120))
         .json(&body)
@@ -396,7 +432,7 @@ pub async fn detect_context(base: &str, key: Option<&str>, model: &str) -> Optio
     if let Some(v) = get_json(format!("{}/models", normalize_base(base)), key).await {
         let list = v.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
         if let Some(m) = list.iter().find(|m| m.get("id").and_then(Value::as_str) == Some(model)) {
-            for path in ["/context_length", "/max_model_len", "/max_context_length", "/context_window", "/meta/n_ctx", "/meta/n_ctx_train", "/top_provider/context_length"] {
+            for path in ["/context_length", "/max_input_tokens", "/max_model_len", "/max_context_length", "/context_window", "/meta/n_ctx", "/meta/n_ctx_train", "/top_provider/context_length"] {
                 if let Some(n) = as_ctx(m.pointer(path)) {
                     return Some(n);
                 }
@@ -456,6 +492,11 @@ pub async fn detect_caps(base: &str, key: Option<&str>, model: &str) -> Option<C
             }
             if let Some(caps) = m.get("capabilities").and_then(Value::as_array) {
                 return Some(from_list(caps));
+            }
+            // Anthropic's: a tree with `supported` at each leaf. Claude reads PDFs.
+            if let Some(vision) = m.pointer("/capabilities/image_input/supported").and_then(Value::as_bool) {
+                let pdf = m.pointer("/capabilities/pdf_input/supported").and_then(Value::as_bool).unwrap_or(true);
+                return Some(Caps { vision, audio: false, video: false, pdf });
             }
         }
     }
@@ -520,7 +561,7 @@ pub fn guess_caps(base: &str, model: &str) -> Caps {
     let audio = any(&["audio", "omni", "voxtral", "gemma-3n", "gemma3n", "ultravox", "phi-4-multimodal", "gemini"]);
     let video = any(&["gemini", "qwen2-vl", "qwen2.5-vl", "qwen3-vl", "omni", "video", "internvl", "llava-onevision", "minicpm-v"]);
     // OpenRouter reads PDFs for every model; OpenAI for its vision models.
-    let pdf = host.contains("openrouter.ai") || (host.contains("api.openai.com") && vision);
+    let pdf = host.contains("openrouter.ai") || host.contains("api.anthropic.com") || (host.contains("api.openai.com") && vision);
     Caps { vision, audio, video, pdf }
 }
 
@@ -638,6 +679,13 @@ mod tests {
     }
 
     #[test]
+    fn private_keys_stay_home() {
+        let mut body = json!({ "model": "m", "_effort": "high", "_web": true, "messages": [{ "role": "assistant", "content": "x", "_native": [], "_relay": {} }] });
+        strip_private(&mut body);
+        assert_eq!(body, json!({ "model": "m", "messages": [{ "role": "assistant", "content": "x" }] }));
+    }
+
+    #[test]
     fn parses_sse_lines() {
         let mut got = Vec::new();
         let mut on = |e: Event| match e {
@@ -646,6 +694,7 @@ mod tests {
             Event::Usage { prompt, completion } => got.push(format!("u:{prompt}/{completion}")),
             Event::Finish(f) => got.push(format!("f:{f}")),
             Event::ToolCall { index, id, name, arguments } => got.push(format!("t:{index}:{id:?}:{name:?}:{arguments}")),
+            Event::Native(_) | Event::Hosted { .. } => got.push("anthropic only".into()),
         };
         parse_line(r#"data: {"choices":[{"delta":{"reasoning_content":"hmm"}}]}"#, &mut on).unwrap();
         parse_line(r#"data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":"stop"}]}"#, &mut on).unwrap();

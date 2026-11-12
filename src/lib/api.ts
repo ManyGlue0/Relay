@@ -80,6 +80,10 @@ export interface SkillsInfo {
 
 /** The built-in skill tools' server id (see skills.rs). */
 export const SKILLS_SERVER = "relay.skills";
+/** Relay's own web search tools (web.rs). */
+export const WEB_SERVER = "relay.web";
+/** The server's own tools, run inside its reply (Anthropic's web search). */
+export const HOSTED_SERVER = "anthropic.hosted";
 
 export interface Provider {
   id: string;

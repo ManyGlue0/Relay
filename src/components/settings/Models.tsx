@@ -57,6 +57,29 @@ function ModelsHome() {
         </Row>
       </Group>
 
+      {providers.some((p) => p.api === "anthropic") && (
+        <Group title="Anthropic">
+          <Row
+            label="Keep the prompt cache for"
+            hint={
+              s.anthropicCache === "1h"
+                ? "Saving to the cache costs twice the normal input; reading it back, a tenth. Worth it if you often come back to a chat after a few minutes"
+                : "Saving to the cache costs 1.25 times the normal input; reading it back, a tenth. Best when you reply within a few minutes"
+            }
+          >
+            <Select
+              value={s.anthropicCache}
+              width={160}
+              onChange={(anthropicCache) => void update({ anthropicCache })}
+              options={[
+                { value: "5m", label: "5 minutes" },
+                { value: "1h", label: "1 hour" },
+              ]}
+            />
+          </Row>
+        </Group>
+      )}
+
       <Group title="Providers" hint="Each one is a server or service Relay talks to">
         {providers.length === 0 ? (
           <div className="group-empty">

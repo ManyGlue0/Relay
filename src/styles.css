@@ -1888,6 +1888,9 @@ body.resizing .titlebar-title {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
 }
 
+.field > .segmented {
+  align-self: flex-start;
+}
 .segmented {
   display: inline-flex;
   padding: 2px;

@@ -410,6 +410,29 @@ fn assistant_message(content: Value, reasoning: &str) -> Value {
     m
 }
 
+/// Puts each assistant round's stored Anthropic blocks (`messages.native`) on
+/// its message as `_native`, found by the `_relay` tag `history_messages` adds.
+fn attach_natives(core: &Core, messages: &mut [Value]) {
+    let ids: Vec<String> = messages.iter().filter_map(|m| m.pointer("/_relay/id").and_then(Value::as_str).map(str::to_string)).collect();
+    if ids.is_empty() {
+        return;
+    }
+    let natives = core.db.natives(&ids).unwrap_or_default();
+    for m in messages.iter_mut() {
+        let (Some(id), Some(round)) = (m.pointer("/_relay/id").and_then(Value::as_str), m.pointer("/_relay/round").and_then(Value::as_u64)) else { continue };
+        if let Some(blocks) = natives.get(id).and_then(|n| n.pointer(&format!("/rounds/{round}"))).filter(|b| b.is_array()) {
+            m["_native"] = blocks.clone();
+        }
+    }
+}
+
+/// Marks an assistant message with the stored message and the round it came from.
+fn tag(mut msg: Value, id: &str, round: &mut usize) -> Value {
+    msg["_relay"] = json!({ "id": id, "round": *round });
+    *round += 1;
+    msg
+}
+
 /// Turns stored messages into the API's messages. With `tools` off, earlier
 /// tool calls are summarized as text (some servers reject tool messages
 /// without tool definitions). With `reasoning`, each assistant message carries
@@ -426,10 +449,12 @@ fn history_messages(history: &[Message], opts: History) -> Vec<Value> {
             continue;
         }
         let parts: Vec<Part> = m.parts.clone().and_then(|p| serde_json::from_value(p).ok()).unwrap_or_default();
+        // Each assistant message out is one round of the reply (one request).
+        let mut round = 0usize;
         if parts.is_empty() {
             // A reply that failed before saying anything isn't part of the conversation.
             if !m.content.trim().is_empty() {
-                out.push(assistant_message(json!(m.content), if reasoning { &m.reasoning } else { "" }));
+                out.push(tag(assistant_message(json!(m.content), if reasoning { &m.reasoning } else { "" }), &m.id, &mut round));
             }
             continue;
         }
@@ -438,14 +463,14 @@ fn history_messages(history: &[Message], opts: History) -> Vec<Value> {
         let mut calls: Vec<Value> = Vec::new();
         let mut results: Vec<Value> = Vec::new();
         // A round ends with its tool calls: they go out with the text and thinking before them.
-        let flush = |text: &mut String, thought: &mut String, calls: &mut Vec<Value>, results: &mut Vec<Value>, out: &mut Vec<Value>| {
+        let flush = |text: &mut String, thought: &mut String, calls: &mut Vec<Value>, results: &mut Vec<Value>, out: &mut Vec<Value>, round: &mut usize| {
             if calls.is_empty() {
                 return;
             }
             let content = if text.trim().is_empty() { Value::Null } else { json!(text.trim()) };
             let mut msg = assistant_message(content, thought);
             msg["tool_calls"] = json!(calls.clone());
-            out.push(msg);
+            out.push(tag(msg, &m.id, round));
             out.append(results);
             calls.clear();
             text.clear();
@@ -454,7 +479,7 @@ fn history_messages(history: &[Message], opts: History) -> Vec<Value> {
         for p in &parts {
             match p {
                 Part::Reasoning { text: t, .. } => {
-                    flush(&mut text, &mut thought, &mut calls, &mut results, &mut out);
+                    flush(&mut text, &mut thought, &mut calls, &mut results, &mut out, &mut round);
                     if reasoning {
                         if !thought.is_empty() {
                             thought.push_str("\n\n");
@@ -463,8 +488,15 @@ fn history_messages(history: &[Message], opts: History) -> Vec<Value> {
                     }
                 }
                 Part::Text { text: t } => {
-                    flush(&mut text, &mut thought, &mut calls, &mut results, &mut out);
+                    flush(&mut text, &mut thought, &mut calls, &mut results, &mut out, &mut round);
                     text.push_str(t);
+                }
+                // The server's own tools ran inside its reply: no round of their own.
+                Part::Tool { server_id, tool, arguments, result, .. } if server_id == crate::anthropic::HOSTED => {
+                    let clipped: String = result.clone().unwrap_or_default().chars().take(1000).collect();
+                    text.push_str(&format!("
+[Used {tool} with {arguments}: {clipped}]
+"));
                 }
                 Part::Tool { id, server, tool, arguments, status, result, .. } => {
                     let answer = match status.as_str() {
@@ -482,9 +514,9 @@ fn history_messages(history: &[Message], opts: History) -> Vec<Value> {
                 }
             }
         }
-        flush(&mut text, &mut thought, &mut calls, &mut results, &mut out);
+        flush(&mut text, &mut thought, &mut calls, &mut results, &mut out, &mut round);
         if !text.trim().is_empty() {
-            out.push(assistant_message(json!(text.trim()), &thought));
+            out.push(tag(assistant_message(json!(text.trim()), &thought), &m.id, &mut round));
         }
     }
     out
@@ -583,7 +615,9 @@ pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &s
         .or_else(|| preset.as_ref().and_then(|p| p.effort.clone()))
         .unwrap_or_else(|| settings.default_effort.clone());
     let skills = if chat.summary.skills { skills::usable(&core) } else { Vec::new() };
-    let (specs, routes) = tool_specs(&core, &skills, chat.summary.web, chat.summary.tools);
+    // Claude on Anthropic's API searches with Anthropic's own tools (`_web` below).
+    let native_api = provider.api == "anthropic";
+    let (specs, routes) = tool_specs(&core, &skills, chat.summary.web && !native_api, chat.summary.tools);
 
     let mut messages: Vec<Value> = Vec::new();
     let mut system = system_prompt(&core, preset.as_ref(), &chat.system_prompt);
@@ -599,6 +633,9 @@ pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &s
     let files = Files { root: attachments::root(&core.data_dir), caps: caps_for(&provider, model) };
     let opts = History { tools: !specs.is_empty(), reasoning: settings.send_reasoning, stamps: settings.share_date, files: Some(&files) };
     messages.extend(history_messages(&history, opts));
+    if native_api {
+        attach_natives(&core, &mut messages);
+    }
 
     let mut body = json!({ "model": model });
     if let Some(p) = &preset {
@@ -613,6 +650,12 @@ pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &s
         }
     }
     apply_effort(&mut body, &effort);
+    if native_api {
+        // For `anthropic`, which builds its own request (never sent as they are).
+        body["_effort"] = json!(effort);
+        body["_cache"] = json!(settings.anthropic_cache);
+        body["_web"] = json!(chat.summary.web);
+    }
 
     // The first exchange names the chat (unless the user named it already).
     let users: Vec<&Message> = history.iter().filter(|m| m.role == "user").collect();
@@ -623,6 +666,7 @@ pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &s
     let token = core.streams.start(&assistant.id, chat_id);
     let job = Job {
         app: app.clone(),
+        api: provider.api.clone(),
         base: provider.base_url,
         key: crate::secrets::key(&provider.id),
         body,
@@ -673,6 +717,8 @@ pub fn normalize_effort(e: &str) -> &'static str {
 
 struct Job {
     app: AppHandle,
+    /// "openai" or "anthropic".
+    api: String,
     base: String,
     key: Option<String>,
     body: Value,
@@ -780,6 +826,10 @@ impl Job {
             answered: false,
         };
         let mut messages = self.messages.clone();
+        // Anthropic's blocks, one list per round, stored with the reply.
+        let mut natives: Vec<Value> = Vec::new();
+        // The last round paused (Anthropic's long server tools): the next one continues it.
+        let mut paused = false;
 
         // A title from the same server comes first: asked after the reply, it
         // would push this conversation out of the server's prompt cache.
@@ -799,14 +849,19 @@ impl Job {
             if !self.specs.is_empty() && round < self.max_rounds {
                 body["tools"] = json!(self.specs);
             }
+            if round == self.max_rounds {
+                body["_web"] = json!(false);
+            }
             let mut split = ThinkSplitter::default();
             let mut calls: Vec<CallAcc> = Vec::new();
             let mut round_text = String::new();
             let mut round_thought = String::new();
             let mut round_first: Option<Instant> = None;
             let mut round_usage: Option<(u64, u64)> = None;
+            let mut round_native: Option<Vec<Value>> = None;
+            let mut hosted: HashMap<String, Part> = HashMap::new();
 
-            let result = llm::stream_chat(&self.base, self.key.as_deref(), body, &self.token, |event| {
+            let result = llm::stream_chat(&self.api, &self.base, self.key.as_deref(), body, &self.token, |event| {
                 match event {
                     Event::Content(text) => {
                         round_first.get_or_insert_with(Instant::now);
@@ -841,6 +896,33 @@ impl Job {
                     }
                     Event::Usage { prompt, completion } => round_usage = Some((prompt, completion)),
                     Event::Finish(reason) => finish = Some(reason),
+                    Event::Native(blocks) => round_native = Some(blocks),
+                    Event::Hosted { id, name, input, result } => {
+                        round_first.get_or_insert_with(Instant::now);
+                        let part = hosted.entry(id.clone()).or_insert_with(|| Part::Tool {
+                            id: id.clone(),
+                            server_id: crate::anthropic::HOSTED.into(),
+                            server: "Anthropic".into(),
+                            tool: name.clone(),
+                            arguments: "{}".into(),
+                            status: "running".into(),
+                            result: None,
+                            ms: None,
+                        });
+                        if let Part::Tool { tool, arguments, status, result: res, .. } = part {
+                            if !name.is_empty() {
+                                *tool = name;
+                            }
+                            if let Some(i) = input {
+                                *arguments = i;
+                            }
+                            if let Some((text, failed)) = result {
+                                *status = if failed { "error".into() } else { "done".into() };
+                                *res = Some(text);
+                            }
+                        }
+                        tr.set_tool(part.clone());
+                    }
                 }
                 tr.flush(false);
             })
@@ -866,6 +948,15 @@ impl Job {
                 completion_tokens += c;
                 have_usage = true;
             }
+            // A paused round and the one continuing it are one turn: their blocks go back together.
+            let blocks = round_native.take();
+            if let Some(b) = &blocks {
+                match natives.last_mut().and_then(Value::as_array_mut).filter(|_| paused) {
+                    Some(last) => last.extend(b.iter().cloned()),
+                    None => natives.push(json!(b)),
+                }
+            }
+            paused = false;
             match result {
                 Ok(End::Done) => {}
                 other => {
@@ -875,6 +966,14 @@ impl Job {
             }
             let calls: Vec<CallAcc> = calls.into_iter().filter(|c| !c.name.is_empty()).collect();
             if calls.is_empty() {
+                if finish.as_deref() == Some("pause_turn") && round < self.max_rounds {
+                    if let Some(b) = blocks {
+                        // Send what came so far: the server picks up where it stopped.
+                        messages.push(json!({ "role": "assistant", "content": round_text, "_native": b }));
+                        paused = true;
+                        continue;
+                    }
+                }
                 break;
             }
 
@@ -889,6 +988,9 @@ impl Job {
             let content = if round_text.trim().is_empty() { Value::Null } else { json!(round_text) };
             let mut msg = assistant_message(content, if self.send_reasoning { &round_thought } else { "" });
             msg["tool_calls"] = json!(tool_calls);
+            if let Some(b) = blocks {
+                msg["_native"] = json!(b);
+            }
             messages.push(msg);
 
             for (c, id) in calls.iter().zip(&ids) {
@@ -1035,6 +1137,9 @@ impl Job {
         if let Err(e) = core.db.finish_message(&self.message_id, &content, &reasoning, &parts_json, status, error.as_deref(), &stats) {
             eprintln!("chat: couldn't store the reply: {e}");
         }
+        if !natives.is_empty() {
+            let _ = core.db.set_native(&self.message_id, &json!({ "rounds": natives }));
+        }
         if let Ok(Some(chat)) = core.db.chat(&self.chat_id) {
             if let Some(m) = chat.messages.into_iter().find(|m| m.id == self.message_id) {
                 let _ = self.app.emit("stream-end", &m);
@@ -1055,6 +1160,7 @@ impl Job {
 /// before the first reply when it runs on the chat's server, after it
 /// otherwise (then the reply helps, and no cache is at stake).
 struct TitlePlan {
+    api: String,
     base: String,
     key: Option<String>,
     model: String,
@@ -1069,7 +1175,7 @@ fn title_plan(core: &Core, chat_id: &str, chat_provider: &Provider, chat_model: 
     let picked = s.title_model.as_ref().and_then(|r| core.db.provider(&r.provider_id).ok().flatten().map(|p| (p, r.model.clone())));
     let (provider, model) = picked.unwrap_or_else(|| (chat_provider.clone(), chat_model.to_string()));
     let before = same_server(&provider.base_url, &chat_provider.base_url);
-    Some(TitlePlan { key: crate::secrets::key(&provider.id), base: provider.base_url, model, before })
+    Some(TitlePlan { key: crate::secrets::key(&provider.id), api: provider.api.clone(), base: provider.base_url, model, before })
 }
 
 fn same_server(a: &str, b: &str) -> bool {
@@ -1103,7 +1209,7 @@ async fn make_title(app: &AppHandle, core: &Core, chat_id: &str, plan: &TitlePla
     quick["chat_template_kwargs"] = json!({ "enable_thinking": false });
     quick["max_tokens"] = json!(32);
     let limit = Duration::from_secs(if reply.is_none() { 30 } else { 90 });
-    let attempt = |b: Value| tokio::time::timeout(limit, llm::complete(&plan.base, plan.key.as_deref(), b));
+    let attempt = |b: Value| tokio::time::timeout(limit, llm::complete(&plan.api, &plan.base, plan.key.as_deref(), b));
     // Rejected (the server doesn't take those fields), or empty (a model that
     // thought anyway and used up the cap): ask plainly.
     let title = match attempt(quick).await {

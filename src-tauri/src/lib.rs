@@ -1,3 +1,4 @@
+mod anthropic;
 mod attachments;
 mod chat;
 mod commands;

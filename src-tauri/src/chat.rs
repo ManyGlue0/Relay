@@ -501,9 +501,9 @@ struct ToolRoute {
 
 /// The tools a reply may use: the built-in skill tools first (when there are
 /// skills), then every tool of the ready MCP servers that isn't off.
-/// The tools a chat offers, in a fixed order (skills, then MCP servers in
-/// their Settings order): each switch adds its own.
-fn tool_specs(core: &Core, skills: &[Skill], mcp: bool) -> (Vec<Value>, HashMap<String, ToolRoute>) {
+/// The tools a chat offers, in a fixed order (skills, Relay's web tools, then
+/// MCP servers in their Settings order): each switch adds its own.
+fn tool_specs(core: &Core, skills: &[Skill], web: bool, mcp: bool) -> (Vec<Value>, HashMap<String, ToolRoute>) {
     let mut specs = Vec::new();
     let mut routes = HashMap::new();
     if !skills.is_empty() {
@@ -518,6 +518,20 @@ fn tool_specs(core: &Core, skills: &[Skill], mcp: bool) -> (Vec<Value>, HashMap<
             routes.insert(
                 alias,
                 ToolRoute { server_id: skills::SERVER_ID.into(), server: skills::SERVER.into(), tool, policy: policy.into() },
+            );
+        }
+    }
+    if web {
+        for (tool, description, schema) in crate::web::tool_specs() {
+            let alias = crate::mcp::tool_alias(crate::web::SERVER, tool);
+            specs.push(json!({
+                "type": "function",
+                "function": { "name": alias, "description": description, "parameters": schema }
+            }));
+            // The switch is the permission: searching and reading pages don't ask.
+            routes.insert(
+                alias,
+                ToolRoute { server_id: crate::web::SERVER_ID.into(), server: crate::web::SERVER.into(), tool: tool.into(), policy: "allow".into() },
             );
         }
     }
@@ -569,7 +583,7 @@ pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &s
         .or_else(|| preset.as_ref().and_then(|p| p.effort.clone()))
         .unwrap_or_else(|| settings.default_effort.clone());
     let skills = if chat.summary.skills { skills::usable(&core) } else { Vec::new() };
-    let (specs, routes) = tool_specs(&core, &skills, chat.summary.tools);
+    let (specs, routes) = tool_specs(&core, &skills, chat.summary.web, chat.summary.tools);
 
     let mut messages: Vec<Value> = Vec::new();
     let mut system = system_prompt(&core, preset.as_ref(), &chat.system_prompt);
@@ -946,6 +960,8 @@ impl Job {
                 let work = async {
                     if builtin {
                         skills::call(&core, &route.tool, &args, &self.token).await
+                    } else if route.server_id == crate::web::SERVER_ID {
+                        crate::web::call(&route.tool, &args).await
                     } else {
                         core.mcp.call(&route.server_id, &route.tool, args.clone()).await
                     }

@@ -10,6 +10,7 @@ mod settings;
 mod skills;
 mod taskbar;
 mod update;
+mod web;
 mod window;
 
 use std::path::PathBuf;

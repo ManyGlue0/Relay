@@ -21,7 +21,7 @@ export function About() {
         </span>
         <div>
           <div className="about-name">Relay</div>
-          <div className="row-hint">Version {info?.version ?? "…"} · A calm chat client for your models</div>
+          <div className="row-hint">Version {info?.version ?? "…"} · A chat client for your models</div>
         </div>
       </div>
       <Updates version={info?.version} />
@@ -36,7 +36,7 @@ export function About() {
             Relay on GitHub
           </Button>
         </Row>
-        <Row label="Holster" hint="Relay lives in the Holster dock, a calm home for your own apps">
+        <Row label="Holster" hint="Relay lives in the Holster dock, a home for your own apps">
           <Button variant="ghost" onClick={() => void openUrl("https://github.com/ManyGlue0/Holster")}>
             Holster on GitHub
           </Button>

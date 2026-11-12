@@ -15,7 +15,7 @@ import { copyText } from "./ui";
 const lowlight = createLowlight(common);
 const ALIASES: Record<string, string> = { sh: "bash", shell: "bash", zsh: "bash", ps1: "powershell", ps: "powershell", js: "javascript", ts: "typescript", py: "python", rs: "rust", yml: "yaml", md: "markdown", html: "xml", jsonc: "json", cs: "csharp", "c++": "cpp" };
 
-function highlight(code: string, lang: string) {
+export function highlight(code: string, lang: string) {
   const name = ALIASES[lang] ?? lang;
   try {
     const tree = name && lowlight.registered(name) ? lowlight.highlight(name, code) : lowlight.highlightAuto(code, { subset: AUTO });

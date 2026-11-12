@@ -183,6 +183,12 @@ export interface Attachment {
   chars?: number;
   /** Recorded in Relay. */
   voice?: boolean;
+  /** x/thumb.png exists: the square tiles show. */
+  thumb?: boolean;
+  /** PDFs: how many pages. */
+  pageCount?: number;
+  /** PDFs without text: how many pages go as images (x/page-N.jpg). */
+  pages: number;
 }
 
 export type Ability = "vision" | "audio" | "video" | "pdf";
@@ -355,7 +361,7 @@ export const api = {
   /** A still ("frame-N.jpg", taken at `at` seconds) or the sound ("sound.wav") Relay made of a file. */
   attachPut: (id: string, file: string, bytes: Uint8Array, at?: number) =>
     invoke<Attachment>("attach_put", bytes, { headers: { "x-id": id, "x-file": file, ...(at !== undefined ? { "x-at": String(at) } : {}) } }),
-  attachInfo: (id: string, info: { duration?: number; width?: number; height?: number }) => invoke<Attachment>("attach_info", { id, ...info }),
+  attachInfo: (id: string, info: { duration?: number; width?: number; height?: number; pageCount?: number }) => invoke<Attachment>("attach_info", { id, ...info }),
   attachDiscard: (ids: string[]) => invoke<void>("attach_discard", { ids }),
   attachOpen: (id: string) => invoke<void>("attach_open", { id }),
 

@@ -454,10 +454,17 @@ pub fn attach_put(core: CoreState, request: tauri::ipc::Request<'_>) -> Result<A
     attachments::put(&files_root(&core), &id, &file, &bytes, at)
 }
 
-/// What the UI measured of a video or audio file.
+/// What the UI measured of a video, audio file or PDF.
 #[tauri::command]
-pub fn attach_info(core: CoreState, id: String, duration: Option<f64>, width: Option<u32>, height: Option<u32>) -> Result<Attachment, String> {
-    attachments::set_info(&files_root(&core), &id, duration, width, height)
+pub fn attach_info(
+    core: CoreState,
+    id: String,
+    duration: Option<f64>,
+    width: Option<u32>,
+    height: Option<u32>,
+    page_count: Option<u32>,
+) -> Result<Attachment, String> {
+    attachments::set_info(&files_root(&core), &id, duration, width, height, page_count)
 }
 
 /// Files taken out of the composer before sending.

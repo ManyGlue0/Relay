@@ -2923,24 +2923,24 @@ body.resizing .titlebar-title {
 .tray-item {
   position: relative;
 }
-.tile {
+.att {
   position: relative;
   border-radius: 12px;
   border: 1px solid var(--border);
   background: var(--surface);
 }
-.tile-thumb {
+.att-thumb {
   width: 56px;
   height: 56px;
 }
-.tile-thumb img {
+.att-thumb img {
   display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
   border-radius: 11px;
 }
-.tile-file {
+.att-file {
   display: flex;
   align-items: center;
   gap: 9px;
@@ -2949,7 +2949,7 @@ body.resizing .titlebar-title {
   padding: 0 12px 0 9px;
   text-align: left;
 }
-.tile-icon {
+.att-icon {
   flex: none;
   display: grid;
   place-items: center;
@@ -2959,13 +2959,13 @@ body.resizing .titlebar-title {
   background: var(--accent-soft);
   color: var(--accent);
 }
-.tile-text {
+.att-text {
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 1px;
 }
-.tile-name {
+.att-name {
   font-size: 12.5px;
   font-weight: 500;
   color: var(--text);
@@ -2973,14 +2973,14 @@ body.resizing .titlebar-title {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.tile-sub {
+.att-sub {
   font-size: 11.5px;
   color: var(--text-3);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.tile-badge {
+.att-badge {
   position: absolute;
   left: 4px;
   bottom: 4px;
@@ -2992,7 +2992,7 @@ body.resizing .titlebar-title {
   line-height: 15px;
   font-variant-numeric: tabular-nums;
 }
-.tile-busy {
+.att-busy {
   position: absolute;
   inset: 0;
   display: grid;
@@ -3001,11 +3001,11 @@ body.resizing .titlebar-title {
   background: var(--scrim);
   color: var(--text-2);
 }
-.tile-file .tile-busy {
+.att-file .att-busy {
   position: static;
   background: none;
 }
-.tile-remove {
+.att-remove {
   position: absolute;
   top: -6px;
   right: -6px;
@@ -3021,21 +3021,21 @@ body.resizing .titlebar-title {
   transform: scale(0.85);
   transition: opacity 0.12s ease, transform 0.12s ease;
 }
-:root[data-theme="dark"] .tile-remove {
+:root[data-theme="dark"] .att-remove {
   color: #18181c;
 }
-.tray-item:hover .tile-remove,
-.msg-image-wrap:hover .tile-remove,
-.msg-file-wrap:hover .tile-remove,
-.tile-remove:focus-visible,
-.tile-remove.shown {
+.tray-item:hover .att-remove,
+.msg-image-wrap:hover .att-remove,
+.msg-file-wrap:hover .att-remove,
+.att-remove:focus-visible,
+.att-remove.shown {
   opacity: 1;
   transform: scale(1);
 }
-.tile.warn {
+.att.warn {
   border-color: color-mix(in srgb, var(--warn) 55%, transparent);
 }
-.tile-warn {
+.att-warn {
   position: absolute;
   left: -6px;
   top: -6px;
@@ -3048,8 +3048,13 @@ body.resizing .titlebar-title {
   color: #fff;
   box-shadow: 0 0 0 2px var(--composer);
 }
-:root[data-theme="dark"] .tile-warn {
+:root[data-theme="dark"] .att-warn {
   color: #2b1d05;
+}
+/* A triangle's weight sits low: its box is centered, its ink 1 px below.
+   Halfway between the two looks centered. */
+.att-warn svg {
+  transform: translateY(-0.5px);
 }
 .caps-note {
   padding-top: 6px;
@@ -3123,7 +3128,7 @@ body.resizing .titlebar-title {
 .msg-user.editing .msg-files {
   align-self: flex-end;
 }
-.msg-user .msg-files .tile-remove {
+.msg-user .msg-files .att-remove {
   box-shadow: 0 0 0 2px var(--sheet-bg);
 }
 
@@ -3191,8 +3196,8 @@ body.resizing .titlebar-title {
   font-variant-numeric: tabular-nums;
 }
 
-/* An image, full size. */
-.lightbox {
+/* A file, big, over the app (images and video on their own; text, documents and PDFs on a sheet). */
+.preview {
   position: fixed;
   inset: 0;
   z-index: 60;
@@ -3201,25 +3206,52 @@ body.resizing .titlebar-title {
   align-items: center;
   justify-content: center;
   gap: 12px;
-  padding: 48px 32px 24px;
+  padding: 44px 32px 20px;
   background: rgba(10, 10, 14, 0.78);
-  cursor: zoom-out;
 }
-.lightbox img {
+.preview-media {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
   max-width: 100%;
-  max-height: calc(100% - 44px);
+  flex: 0 1 auto;
+}
+.preview-media img,
+.preview-media video {
+  display: block;
+  max-width: calc(100vw - 64px);
+  max-height: calc(100vh - 120px);
   border-radius: 8px;
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45);
+  background: #000;
 }
-.lightbox-bar {
+.preview-media img {
+  background: none;
+}
+.preview-bar {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 12px;
+  max-width: 100%;
   color: rgba(255, 255, 255, 0.86);
   font-size: 12.5px;
-  cursor: default;
 }
-.lightbox-open {
+.preview-bar-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.preview-bar-sub {
+  flex: none;
+  color: rgba(255, 255, 255, 0.55);
+  font-variant-numeric: tabular-nums;
+}
+.preview-bar-close {
+  flex: none;
   height: 28px;
   padding: 0 12px;
   border-radius: 14px;
@@ -3227,8 +3259,133 @@ body.resizing .titlebar-title {
   color: #fff;
   font-size: 12.5px;
 }
-.lightbox-open:hover {
+.preview-bar-close:hover {
   background: rgba(255, 255, 255, 0.22);
+}
+.preview-sheet {
+  display: flex;
+  flex-direction: column;
+  width: min(860px, 100%);
+  max-height: min(900px, 100%);
+  border-radius: 14px;
+  background: var(--sheet-bg);
+  box-shadow: var(--shadow-pop);
+  overflow: hidden;
+  cursor: default;
+}
+/* PDFs take the full height (their pages are laid out before they're drawn). */
+.preview-sheet.tall {
+  height: 100%;
+}
+.preview-sheet.small {
+  width: min(420px, 100%);
+}
+.preview-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 60px;
+  padding: 0 10px 0 12px;
+  border-bottom: 1px solid var(--border);
+}
+.preview-fill {
+  flex: 1;
+}
+.preview-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  user-select: text;
+}
+.preview-sheet.small .preview-body {
+  padding: 16px;
+}
+.preview-sheet.small .audio {
+  width: 100%;
+}
+.preview-text {
+  margin: 0;
+  padding: 16px 20px 20px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+}
+.preview-text.mono {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.preview-text.prose {
+  font-family: var(--font);
+  font-size: 14px;
+}
+.preview-text code {
+  font: inherit;
+  background: none;
+  padding: 0;
+}
+.preview-more,
+.preview-empty {
+  padding: 4px 20px 20px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.preview-empty {
+  display: grid;
+  place-items: center;
+  min-height: 160px;
+  padding: 20px;
+  font-size: 13px;
+}
+.pdf-pages {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 24px 24px;
+  background: var(--code-bg);
+  min-height: 100%;
+}
+.pdf-page {
+  position: relative;
+  width: 100%;
+  max-width: 760px;
+  background: #fff;
+  border-radius: 3px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18), 0 6px 18px rgba(0, 0, 0, 0.08);
+  overflow: hidden;
+}
+.pdf-page canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.pdf-page.drawn canvas {
+  opacity: 1;
+}
+.pdf-page-num {
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  font-size: 10.5px;
+  line-height: 17px;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+.tray .att[role="button"] {
+  cursor: pointer;
+}
+.tray .att[role="button"]:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 
 /* Files dragged over the chat. */

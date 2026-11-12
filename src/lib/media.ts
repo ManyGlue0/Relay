@@ -83,15 +83,100 @@ function stillTimes(duration: number): number[] {
   return Array.from({ length: n }, (_, i) => Math.round(((i + 0.5) * duration) / n * 10) / 10);
 }
 
+function loadImage(url: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("The image couldn't be read"));
+    img.src = url;
+  });
+}
+
+const blobOf = (canvas: HTMLCanvasElement, type: string, quality?: number) =>
+  new Promise<Blob>((resolve, reject) => canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("Couldn't draw it"))), type, quality));
+const bytesOf = async (b: Blob) => new Uint8Array(await b.arrayBuffer());
+
+/** Size of the tile image (the composer shows 56 px, a message's grid 120 px; this covers both, sharp). */
+const THUMB = 256;
+
+/** The square a tile shows: the picture's visible part (transparent edges
+ *  cropped, so an icon fills its tile), cut to a square from the middle. */
+async function thumbOf(url: string): Promise<Uint8Array> {
+  const img = await loadImage(url);
+  const w = img.naturalWidth;
+  const h = img.naturalHeight;
+  // Find the visible part on a small copy.
+  const k = Math.min(1, 400 / Math.max(w, h));
+  const scan = document.createElement("canvas");
+  scan.width = Math.max(1, Math.round(w * k));
+  scan.height = Math.max(1, Math.round(h * k));
+  const sg = scan.getContext("2d", { willReadFrequently: true })!;
+  sg.drawImage(img, 0, 0, scan.width, scan.height);
+  const px = sg.getImageData(0, 0, scan.width, scan.height).data;
+  let x0 = scan.width;
+  let y0 = scan.height;
+  let x1 = -1;
+  let y1 = -1;
+  for (let y = 0; y < scan.height; y++) {
+    for (let x = 0; x < scan.width; x++) {
+      if (px[(y * scan.width + x) * 4 + 3] > 12) {
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+      }
+    }
+  }
+  // Fully transparent: keep the whole thing.
+  const box = x1 < 0 ? { x: 0, y: 0, w, h } : { x: x0 / k, y: y0 / k, w: (x1 - x0 + 1) / k, h: (y1 - y0 + 1) / k };
+  const side = Math.min(box.w, box.h);
+  const out = document.createElement("canvas");
+  out.width = THUMB;
+  out.height = THUMB;
+  const g = out.getContext("2d")!;
+  g.imageSmoothingQuality = "high";
+  g.drawImage(img, box.x + (box.w - side) / 2, box.y + (box.h - side) / 2, side, side, 0, 0, THUMB, THUMB);
+  return bytesOf(await blobOf(out, "image/png"));
+}
+
+/** Pages of a PDF without text, as the model gets them: the longer side this many pixels (sharp enough to read a scan). */
+const PAGE_PX = 1400;
+
 /**
- * Prepares what the model may need from a file: a video's stills, length,
- * size and sound; an audio file's length and (unless it's WAV or MP3) a WAV
- * copy. Problems leave the file as it is; it can still be sent.
+ * Prepares what the model may need from a file: an image's tile; a video's
+ * stills, length, size and sound; an audio file's length and (unless it's WAV
+ * or MP3) a WAV copy; a PDF's page count, its text when Relay's reader found
+ * none, and its pages as images when it has no text. `progress` hears about
+ * long jobs. Problems leave the file as it is; it can still be sent.
  */
-export async function prepare(a: Attachment): Promise<Attachment> {
+export async function prepare(a: Attachment, progress?: (text: string) => void): Promise<Attachment> {
   let out = a;
   try {
-    if (a.kind === "video") {
+    if (a.kind === "image") {
+      out = await api.attachPut(a.id, "thumb.png", await thumbOf(fileUrl(a)));
+    } else if (a.kind === "pdf") {
+      const { openPdf, pdfText, drawPage, closePdf, LETTERS_PER_PAGE } = await import("./pdf");
+      const doc = await openPdf(fileUrl(a));
+      try {
+        const pages = doc.numPages;
+        out = await api.attachInfo(a.id, { pageCount: pages });
+        progress?.("Reading its text…");
+        const { text, letters } = await pdfText(doc);
+        if (!a.chars && text.trim()) out = await api.attachPut(a.id, "text.txt", new TextEncoder().encode(text));
+        // No text (a scan, or pictures): the pages themselves.
+        if (letters < LETTERS_PER_PAGE * pages) {
+          const canvas = document.createElement("canvas");
+          for (let n = 1; n <= pages; n++) {
+            progress?.(`Page ${n} of ${pages}`);
+            await drawPage(doc, n, PAGE_PX, canvas);
+            out = await api.attachPut(a.id, `page-${n - 1}.jpg`, await bytesOf(await blobOf(canvas, "image/jpeg", 0.85)));
+          }
+        }
+      } finally {
+        closePdf(doc);
+      }
+    } else if (a.kind === "video") {
       const v = await loadVideo(fileUrl(a));
       const longest = 768;
       const scale = Math.min(1, longest / Math.max(v.videoWidth, v.videoHeight, 1));

@@ -41,6 +41,8 @@ export interface DraftFile {
   ready: boolean;
   /** There as soon as it's copied (thumbnails show while Relay prepares the rest). */
   attachment?: Attachment;
+  /** What a long preparation is at ("Page 3 of 40"). */
+  progress?: string;
 }
 
 /** Files a message may carry. */
@@ -404,7 +406,7 @@ export const useStore = create<State>((set, get) => ({
         try {
           const a = await j.add();
           patchFile(key, j.key, { attachment: a, name: a.name });
-          patchFile(key, j.key, { attachment: await prepare(a), ready: true });
+          patchFile(key, j.key, { attachment: await prepare(a, (progress) => patchFile(key, j.key, { progress })), ready: true });
         } catch (e) {
           dropFile(key, j.key);
           get().toast(errorText(e));

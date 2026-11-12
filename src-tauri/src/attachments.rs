@@ -3,9 +3,11 @@
 //! Each one lives in `<data>\attachments\<id>\`: the file itself under its own
 //! (cleaned) name, and Relay's files in `x\`: `meta.json` (the `Attachment`),
 //! `text.txt` (text pulled out of a PDF or document), `frame-N.jpg` (stills
-//! from a video) and `sound.wav` (the sound of a video or audio file, 16 kHz
-//! mono). The UI makes the frames and the sound, since the webview decodes
-//! media; Relay copies, sorts and pulls text out.
+//! from a video), `sound.wav` (the sound of a video or audio file, 16 kHz
+//! mono), `thumb.png` (an image's tile, transparent edges cropped) and
+//! `page-N.jpg` (the pages of a PDF without text). The UI makes those, since
+//! the webview decodes media and draws PDFs (pdf.js); Relay copies, sorts and
+//! pulls text out.
 //!
 //! The UI shows them through the `relay` protocol (`serve`). When a model is
 //! asked, `content_parts` turns them into the API's message parts, following
@@ -62,6 +64,19 @@ pub struct Attachment {
     /// Recorded in Relay (a voice message).
     #[serde(default, skip_serializing_if = "is_false")]
     pub voice: bool,
+    /// `x/thumb.png` exists: the square the tiles show.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub thumb: bool,
+    /// PDFs: how many pages it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_count: Option<u32>,
+    /// PDFs without text: its pages as images (`x/page-N.jpg`), sent instead of the text.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pages: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 fn is_false(b: &bool) -> bool {
@@ -243,15 +258,34 @@ pub fn load(root: &Path, id: &str) -> Result<Attachment, String> {
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
-/// A file Relay made for an attachment: a video still (`frame-N.jpg`, taken
-/// at `at` seconds) or its sound (`sound.wav`).
+/// A file the UI made for an attachment: a video still (`frame-N.jpg`, taken
+/// at `at` seconds), its sound (`sound.wav`), an image's tile (`thumb.png`),
+/// a page of a PDF without text (`page-N.jpg`), or a PDF's text when Relay's
+/// own reader found none (`text.txt`).
 pub fn put(root: &Path, id: &str, file: &str, bytes: &[u8], at: Option<f64>) -> Result<Attachment, String> {
     let mut a = load(root, id)?;
     let x = root.join(id).join("x");
+    let numbered = |prefix: &str| file.strip_prefix(prefix).and_then(|f| f.strip_suffix(".jpg")).and_then(|n| n.parse::<usize>().ok());
     if file == "sound.wav" {
         std::fs::write(x.join(file), bytes).map_err(|e| e.to_string())?;
         a.sound = true;
-    } else if let Some(n) = file.strip_prefix("frame-").and_then(|f| f.strip_suffix(".jpg")).and_then(|n| n.parse::<usize>().ok()) {
+    } else if file == "thumb.png" {
+        std::fs::write(x.join(file), bytes).map_err(|e| e.to_string())?;
+        a.thumb = true;
+    } else if file == "text.txt" {
+        if a.kind != "pdf" || a.chars.is_some_and(|n| n > 0) {
+            return Err("That file already has its text".into());
+        }
+        let text = tidy(&String::from_utf8_lossy(bytes));
+        a.chars = Some(text.chars().count() as u64);
+        std::fs::write(x.join(file), text).map_err(|e| e.to_string())?;
+    } else if let Some(n) = numbered("page-") {
+        if a.kind != "pdf" || n != a.pages as usize {
+            return Err("Pages arrive in order".into());
+        }
+        std::fs::write(x.join(file), bytes).map_err(|e| e.to_string())?;
+        a.pages += 1;
+    } else if let Some(n) = numbered("frame-") {
         if n >= MAX_FRAMES || n != a.frames.len() {
             return Err("Stills arrive in order, at most 16".into());
         }
@@ -264,9 +298,19 @@ pub fn put(root: &Path, id: &str, file: &str, bytes: &[u8], at: Option<f64>) -> 
     Ok(a)
 }
 
-/// What the UI measured: a video's or audio's length, a video's size.
-pub fn set_info(root: &Path, id: &str, duration: Option<f64>, width: Option<u32>, height: Option<u32>) -> Result<Attachment, String> {
+/// What the UI measured: a video's or audio's length, a video's size, a PDF's pages.
+pub fn set_info(
+    root: &Path,
+    id: &str,
+    duration: Option<f64>,
+    width: Option<u32>,
+    height: Option<u32>,
+    page_count: Option<u32>,
+) -> Result<Attachment, String> {
     let mut a = load(root, id)?;
+    if let Some(n) = page_count.filter(|n| *n > 0) {
+        a.page_count = Some(n);
+    }
     if let Some(d) = duration.filter(|d| d.is_finite() && *d > 0.0) {
         a.duration = Some(d);
     }
@@ -485,6 +529,10 @@ fn unescape(s: &str) -> String {
 /// (`relay.exe --pdf-text <pdf> <out>`): a PDF the reader chokes on can't take
 /// the app down with it. A minute at most.
 fn pdf_text(pdf: &Path, out: &Path) -> Option<String> {
+    // Under `cargo test` the current exe is the test runner, not Relay.
+    if cfg!(test) {
+        return None;
+    }
     let exe = std::env::current_exe().ok()?;
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("--pdf-text").arg(pdf).arg(out);
@@ -722,6 +770,16 @@ pub fn content_parts(root: &Path, list: &[Attachment], caps: Caps) -> Vec<Value>
                 Some(url) => parts.push(json!({ "type": "file", "file": { "filename": a.name, "file_data": url } })),
                 None => parts.push(gone()),
             },
+            // No text: its pages, as images.
+            "pdf" if a.pages > 0 => {
+                let n = a.pages;
+                parts.push(text(format!("[PDF: {}, {n} page{} as images]", a.name, if n == 1 { "" } else { "s" })));
+                for i in 0..n {
+                    if let Some(url) = data_url(&root.join(&a.id).join("x").join(format!("page-{i}.jpg")), "image/jpeg") {
+                        parts.push(json!({ "type": "image_url", "image_url": { "url": url } }));
+                    }
+                }
+            }
             "pdf" | "document" => {
                 let body = std::fs::read_to_string(root.join(&a.id).join("x").join("text.txt")).unwrap_or_default();
                 let body = if body.trim().is_empty() {
@@ -823,13 +881,35 @@ mod tests {
         put(&root, &a.id, "frame-0.jpg", b"jpg0", Some(0.0)).unwrap();
         let a = put(&root, &a.id, "frame-1.jpg", b"jpg1", Some(5.0)).unwrap();
         assert!(put(&root, &a.id, "frame-5.jpg", b"x", None).is_err());
-        let a = set_info(&root, &a.id, Some(10.0), Some(640), Some(360)).unwrap();
+        let a = set_info(&root, &a.id, Some(10.0), Some(640), Some(360), None).unwrap();
         let stills = content_parts(&root, &[a.clone()], Caps { vision: true, ..Default::default() });
         assert_eq!(stills.len(), 3);
         assert_eq!(stills[0]["text"], "[Video: clip.mp4, 0:10, as 2 stills taken at 0:00, 0:05]");
         assert_eq!(stills[1]["type"], "image_url");
         let whole = content_parts(&root, &[a], Caps { vision: true, video: true, ..Default::default() });
         assert_eq!(whole[1]["type"], "video_url");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pdfs_without_text_go_as_pages() {
+        let dir = std::env::temp_dir().join(format!("relay-att-{}", new_id()));
+        let root = root(&dir);
+        // Not a real PDF: Relay's reader finds no text in it.
+        let a = add_bytes(&root, "scan.pdf", b"%PDF-1.4 nothing", false, None).unwrap();
+        assert_eq!(a.chars, Some(0));
+        assert!(put(&root, &a.id, "page-1.jpg", b"x", None).is_err());
+        put(&root, &a.id, "page-0.jpg", b"jpg0", None).unwrap();
+        let a = put(&root, &a.id, "page-1.jpg", b"jpg1", None).unwrap();
+        let parts = content_parts(&root, &[a.clone()], Caps { vision: true, ..Default::default() });
+        assert_eq!(parts[0]["text"], "[PDF: scan.pdf, 2 pages as images]");
+        assert_eq!(parts.len(), 3);
+        // A server that reads PDFs still gets the file.
+        assert_eq!(content_parts(&root, &[a.clone()], Caps { pdf: true, ..Default::default() })[0]["type"], "file");
+        // Text found by the UI's reader fills in once, and only when Relay's found none.
+        let a = put(&root, &a.id, "text.txt", b"Scanned words", None).unwrap();
+        assert_eq!(a.chars, Some(13));
+        assert!(put(&root, &a.id, "text.txt", b"again", None).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

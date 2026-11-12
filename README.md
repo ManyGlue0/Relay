@@ -5,7 +5,7 @@
 <h1 align="center">Relay</h1>
 
 <p align="center">
-  <b>A calm chat client for your models.</b><br>
+  <b>A chat client for your models.</b><br>
   Local servers like Ollama and LM Studio, or any OpenAI-compatible API, in one native Windows 11 window that lives in the Holster dock.
 </p>
 

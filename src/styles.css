@@ -1453,6 +1453,11 @@ body.resizing .titlebar-title {
   color: var(--on-accent);
   transition: background 0.15s ease, opacity 0.15s ease;
 }
+/* The arrowhead's weight sits at the top, so a centered arrow looks high;
+   1px down puts its ink in the middle of the circle (measured). */
+.send-btn .lucide-arrow-up {
+  transform: translateY(1px);
+}
 .send-btn:disabled {
   background: var(--border-strong);
   color: var(--text-3);

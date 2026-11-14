@@ -46,7 +46,7 @@ fn request(method: reqwest::Method, base: &str, path: &str, key: Option<&str>) -
 /// sent one, else the status.
 pub(crate) async fn failure(resp: reqwest::Response) -> String {
     let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
+    let body = crate::limits::text_start(resp, crate::limits::MAX_ERROR).await;
     let message = serde_json::from_str::<Value>(&body).ok().and_then(|v| {
         v.pointer("/error/message")
             .or_else(|| v.get("error").filter(|e| e.is_string()))
@@ -112,7 +112,9 @@ async fn models_of(base: &str, key: Option<&str>, timeout: Duration) -> Result<V
         }
         return Err(ListError::Answered(msg));
     }
-    let body: Value = resp.json().await.map_err(|_| ListError::Answered("The server's model list wasn't JSON".to_string()))?;
+    let body: Value = crate::limits::json(resp, crate::limits::MAX_JSON)
+        .await
+        .map_err(|_| ListError::Answered("The server's model list wasn't JSON (or was too long)".to_string()))?;
     let list = body.get("data").or_else(|| body.get("models")).and_then(Value::as_array).cloned().unwrap_or_default();
     let mut ids: Vec<String> = list
         .iter()
@@ -298,26 +300,35 @@ pub async fn stream_chat(
     }
 
     let mut stream = resp.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
+    let mut lines = crate::limits::Lines::default();
     loop {
         let chunk = tokio::select! {
-            c = stream.next() => c,
+            c = next_chunk(&mut stream) => c?,
             _ = cancel.cancelled() => return Ok(End::Cancelled),
         };
         let Some(chunk) = chunk else { break };
-        let chunk = chunk.map_err(|e| format!("The connection dropped: {e}"))?;
-        buf.extend_from_slice(&chunk);
-        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-            let line: Vec<u8> = buf.drain(..=pos).collect();
-            let line = String::from_utf8_lossy(&line);
+        for line in lines.push(chunk.as_ref(), crate::limits::MAX_JSON)? {
             if parse_line(line.trim(), &mut on)? {
                 return Ok(End::Done);
             }
         }
     }
-    let rest = String::from_utf8_lossy(&buf).to_string();
-    parse_line(rest.trim(), &mut on)?;
+    parse_line(lines.rest().trim(), &mut on)?;
     Ok(End::Done)
+}
+
+/// The next piece of a reply stream; an error when the connection drops or
+/// the server goes quiet for `limits::IDLE`.
+pub(crate) async fn next_chunk<S, B>(stream: &mut S) -> Result<Option<B>, String>
+where
+    S: futures_util::Stream<Item = reqwest::Result<B>> + Unpin,
+{
+    match tokio::time::timeout(crate::limits::IDLE, stream.next()).await {
+        Err(_) => Err(format!("The server stopped sending for {} minutes", crate::limits::IDLE.as_secs() / 60)),
+        Ok(None) => Ok(None),
+        Ok(Some(Ok(b))) => Ok(Some(b)),
+        Ok(Some(Err(e))) => Err(format!("The connection dropped: {e}")),
+    }
 }
 
 /// Handles one SSE line. `Ok(true)` at `[DONE]`.
@@ -393,7 +404,7 @@ pub async fn complete(api: &str, base: &str, key: Option<&str>, mut body: Value)
     if !resp.status().is_success() {
         return Err(failure(resp).await);
     }
-    let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let v: Value = crate::limits::json(resp, crate::limits::MAX_JSON).await?;
     let text = v.pointer("/choices/0/message/content").and_then(Value::as_str).unwrap_or("").to_string();
     let mut split = ThinkSplitter::default();
     let (mut content, _) = split.feed(&text);
@@ -422,7 +433,7 @@ async fn get_json(url: String, key: Option<&str>) -> Option<Value> {
     if !resp.status().is_success() {
         return None;
     }
-    resp.json::<Value>().await.ok()
+    crate::limits::json(resp, crate::limits::MAX_JSON).await.ok()
 }
 
 /// Asks the server how much context `model` has, the ways the common servers
@@ -455,7 +466,7 @@ pub async fn detect_context(base: &str, key: Option<&str>, model: &str) -> Optio
         show = show.bearer_auth(k);
     }
     let v = match show.send().await {
-        Ok(r) if r.status().is_success() => r.json::<Value>().await.ok()?,
+        Ok(r) if r.status().is_success() => crate::limits::json(r, crate::limits::MAX_JSON).await.ok()?,
         _ => return None,
     };
     // A num_ctx the user set wins over what the model could do.
@@ -516,7 +527,7 @@ pub async fn detect_caps(base: &str, key: Option<&str>, model: &str) -> Option<C
     }
     if let Ok(r) = show.send().await {
         if r.status().is_success() {
-            if let Some(caps) = r.json::<Value>().await.ok().and_then(|v| v.get("capabilities").and_then(Value::as_array).cloned()) {
+            if let Some(caps) = crate::limits::json(r, crate::limits::MAX_JSON).await.ok().and_then(|v| v.get("capabilities").and_then(Value::as_array).cloned()) {
                 return Some(from_list(&caps));
             }
         }
@@ -676,6 +687,56 @@ mod tests {
         assert_eq!(run(&["<", "b>bold</b>"]), ("<b>bold</b>".into(), "".into()));
         assert_eq!(run(&["  <think>unfinished"]), ("".into(), "unfinished".into()));
         assert_eq!(run(&["a < b"]), ("a < b".into(), "".into()));
+    }
+
+    /// A one-shot HTTP server on loopback that answers with `head` + `body`.
+    async fn serve_once(response: Vec<u8>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 64 * 1024];
+                let _ = sock.read(&mut buf).await;
+                // In small pieces, so lines and characters split across chunks.
+                for piece in response.chunks(7) {
+                    let _ = sock.write_all(piece).await;
+                    let _ = sock.flush().await;
+                }
+            }
+        });
+        format!("http://127.0.0.1:{port}/v1")
+    }
+
+    #[tokio::test]
+    async fn streams_a_reply_end_to_end() {
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"Héllo\"}}]}\n\n\
+                   data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":99999999999,\"function\":{\"name\":\"x\"}}]}}]}\n\n\
+                   data: {\"choices\":[{\"delta\":{\"content\":\" wörld\"},\"finish_reason\":\"stop\"}]}\n\n\
+                   data: [DONE]\n\n";
+        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{sse}");
+        let base = serve_once(resp.into_bytes()).await;
+        let mut text = String::new();
+        let mut calls = 0;
+        let end = stream_chat("openai", &base, None, json!({ "model": "m", "messages": [] }), &CancellationToken::new(), |e| match e {
+            Event::Content(c) => text.push_str(&c),
+            Event::ToolCall { .. } => calls += 1,
+            _ => {}
+        })
+        .await;
+        assert!(matches!(end, Ok(End::Done)));
+        assert_eq!(text, "Héllo wörld");
+        // Passed on as is; the reply loop drops the index (chat::add_call_piece).
+        assert_eq!(calls, 1);
+    }
+
+    #[tokio::test]
+    async fn error_bodies_are_read_only_in_part() {
+        let body = "x".repeat(1024 * 1024);
+        let resp = format!("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n{body}");
+        let base = serve_once(resp.into_bytes()).await;
+        let err = list_models(&base, None).await.unwrap_err();
+        assert_eq!(err, "500 Internal Server Error");
     }
 
     #[test]

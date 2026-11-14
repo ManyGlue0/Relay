@@ -230,7 +230,7 @@ pub fn reply_finished(app: &AppHandle, chat_id: &str, content: &str) {
         let Some(api) = holster_api() else { return };
         let shown = match client().post(format!("{api}/apps/{ID}/notify")).json(&card).send().await {
             Ok(resp) if resp.status().is_success() => {
-                let body: Value = resp.json().await.unwrap_or(Value::Null);
+                let body: Value = crate::limits::json(resp, crate::limits::MAX_ERROR).await.unwrap_or(Value::Null);
                 !body.get("muted").and_then(Value::as_bool).unwrap_or(false)
             }
             _ => false,
@@ -318,7 +318,7 @@ impl Holster {
         let Some(api) = holster_api() else { return };
         let Ok(resp) = client().post(format!("{api}/apps/{ID}/reload")).send().await else { return };
         let ok = resp.status().is_success();
-        let body: Value = resp.json().await.unwrap_or(Value::Null);
+        let body: Value = crate::limits::json(resp, crate::limits::MAX_ERROR).await.unwrap_or(Value::Null);
         let mut st = self.status.lock().unwrap();
         st.warnings = body
             .get("warnings")

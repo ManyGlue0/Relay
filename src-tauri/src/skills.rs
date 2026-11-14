@@ -30,6 +30,8 @@ pub const RUN_SCRIPT: &str = "run_script";
 const MAX_BODY: usize = 200_000;
 const MAX_FILE: usize = 100_000;
 const MAX_OUTPUT: usize = 24_000;
+/// Bytes of a script's output (and of its errors) Relay keeps.
+const MAX_CAPTURE: usize = 1024 * 1024;
 const MAX_LISTED: usize = 200;
 const SCRIPT_TIMEOUT: Duration = Duration::from_secs(300);
 /// Script files Relay knows how to run.
@@ -564,7 +566,7 @@ fn script_command(path: &Path, args: &[String]) -> Result<(String, Vec<String>),
 }
 
 async fn run(core: &Core, skill: &Skill, path: &Path, args: &[String], input: Option<String>, token: &CancellationToken) -> Result<(String, bool), String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
     let (program, pre) = match script_command(path, args) {
         Ok(x) => x,
         Err(e) => return Ok((e, true)),
@@ -613,16 +615,10 @@ async fn run(core: &Core, skill: &Skill, path: &Path, args: &[String], input: Op
         }
         // Dropping stdin closes it: scripts reading it see the end.
     };
-    let read_out = async move {
-        let mut b = Vec::new();
-        let _ = stdout.read_to_end(&mut b).await;
-        b
-    };
-    let read_err = async move {
-        let mut b = Vec::new();
-        let _ = stderr.read_to_end(&mut b).await;
-        b
-    };
+    // Only the start of each is kept (the model sees 24,000 characters at
+    // most); the rest is read and dropped so the script never blocks.
+    let read_out = async move { crate::limits::read_capped(&mut stdout, MAX_CAPTURE).await.0 };
+    let read_err = async move { crate::limits::read_capped(&mut stderr, MAX_CAPTURE).await.0 };
     let work = async { tokio::join!(feed, read_out, read_err, child.wait()) };
     let outcome = tokio::select! {
         r = work => Some(r),

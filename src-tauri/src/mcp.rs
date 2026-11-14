@@ -15,7 +15,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::sync::oneshot;
 
 use crate::db::McpServer;
@@ -256,8 +256,8 @@ impl Mcp {
         let tail = Arc::new(Mutex::new(String::new()));
         let tail_w = tail.clone();
         tauri::async_runtime::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut stderr = BufReader::new(stderr);
+            while let Ok(Some(line)) = crate::limits::next_line(&mut stderr, 64 * 1024).await {
                 let mut t = tail_w.lock().unwrap();
                 t.push_str(&line);
                 t.push('\n');
@@ -272,8 +272,8 @@ impl Mcp {
         // stdout: responses, server requests and notifications.
         let (me, weak, id) = (self.clone(), Arc::downgrade(&conn), server.id.clone());
         tauri::async_runtime::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut stdout = BufReader::new(stdout);
+            while let Ok(Some(line)) = crate::limits::next_line(&mut stdout, crate::limits::MAX_JSON).await {
                 let Ok(msg) = serde_json::from_str::<Value>(line.trim()) else { continue };
                 let Some(conn) = weak.upgrade() else { break };
                 conn.handle_incoming(&me, &id, msg).await;
@@ -470,7 +470,7 @@ impl Conn {
         }
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = crate::limits::text_start(resp, crate::limits::MAX_ERROR).await;
             let body = body.trim();
             return Err(if body.is_empty() || body.len() > 300 { format!("The server answered {status}") } else { format!("{status}: {body}") });
         }
@@ -481,7 +481,7 @@ impl Conn {
         let resp = self.http_post(msg).await?;
         let is_sse = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|c| c.contains("text/event-stream"));
         if !is_sse {
-            let v: Value = resp.json().await.map_err(|_| "The server's answer wasn't JSON".to_string())?;
+            let v: Value = crate::limits::json(resp, crate::limits::MAX_JSON).await.map_err(|e| format!("The server's answer: {e}"))?;
             let items = if let Value::Array(a) = v { a } else { vec![v] };
             for item in items {
                 if item.get("id").and_then(Value::as_u64) == Some(id) {
@@ -491,14 +491,12 @@ impl Conn {
             return Err("The server didn't answer the request".into());
         }
         let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
+        let mut lines = crate::limits::Lines::default();
         let mut data = String::new();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| format!("The connection dropped: {e}"))?;
-            buf.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(pos) = buf.find('\n') {
-                let line: String = buf.drain(..=pos).collect();
-                let line = line.trim_end_matches(['\r', '\n']);
+            for line in lines.push(&chunk, crate::limits::MAX_JSON)? {
+                let line = line.trim_end_matches('\r');
                 if line.is_empty() {
                     if let Ok(v) = serde_json::from_str::<Value>(&data) {
                         if v.get("id").and_then(Value::as_u64) == Some(id) && (v.get("result").is_some() || v.get("error").is_some()) {
@@ -514,6 +512,9 @@ impl Conn {
                         data.push('\n');
                     }
                     data.push_str(d.trim_start());
+                    if data.len() > crate::limits::MAX_JSON {
+                        return Err("The server sent a message longer than 32 MB".into());
+                    }
                 }
             }
         }

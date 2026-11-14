@@ -195,7 +195,7 @@ async fn search(query: &str, count: usize) -> Result<Vec<Hit>, String> {
 async fn get_text(url: &str) -> Result<String, String> {
     let resp = client().get(url).send().await.map_err(|e| format!("Couldn't reach the search: {e}"))?;
     let status = resp.status();
-    let body = resp.text().await.map_err(|e| e.to_string())?;
+    let body = String::from_utf8_lossy(&crate::limits::body(resp, PAGE_BYTES).await?).into_owned();
     if !status.is_success() && status.as_u16() != 202 {
         return Err(format!("The search answered {status}"));
     }

@@ -4,6 +4,7 @@ mod chat;
 mod commands;
 mod db;
 mod holster;
+mod limits;
 mod llm;
 mod mcp;
 mod secrets;

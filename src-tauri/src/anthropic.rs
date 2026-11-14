@@ -22,7 +22,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
@@ -103,7 +102,7 @@ async fn info(base: &str, key: Option<&str>, model: &str) -> Info {
         req = req.header("x-api-key", k);
     }
     let found = match req.send().await {
-        Ok(r) if r.status().is_success() => r.json::<Value>().await.ok().map(|v| info_from(&v)),
+        Ok(r) if r.status().is_success() => crate::limits::json(r, crate::limits::MAX_JSON).await.ok().map(|v| info_from(&v)),
         _ => None,
     };
     let i = found.unwrap_or_default();
@@ -393,18 +392,14 @@ pub async fn stream_chat(base: &str, key: Option<&str>, body: Value, cancel: &Ca
 
     let mut acc = Acc::default();
     let mut stream = resp.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
+    let mut lines = crate::limits::Lines::default();
     loop {
         let chunk = tokio::select! {
-            c = stream.next() => c,
+            c = llm::next_chunk(&mut stream) => c?,
             _ = cancel.cancelled() => return Ok(End::Cancelled),
         };
         let Some(chunk) = chunk else { break };
-        let chunk = chunk.map_err(|e| format!("The connection dropped: {e}"))?;
-        buf.extend_from_slice(&chunk);
-        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-            let line: Vec<u8> = buf.drain(..=pos).collect();
-            let line = String::from_utf8_lossy(&line);
+        for line in lines.push(chunk.as_ref(), crate::limits::MAX_JSON)? {
             if let Some(data) = line.trim().strip_prefix("data:") {
                 if acc.event(data.trim(), &mut on)? {
                     return Ok(End::Done);

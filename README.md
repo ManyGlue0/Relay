@@ -103,7 +103,7 @@ Tool servers start with Relay, run without a console window, and end when Relay 
 A skill teaches models one kind of task. It's a folder with a `SKILL.md` (a `name`, a `description`, then instructions in markdown) and whatever else it needs: references, templates, scripts. In **Settings → Skills** you can write one, or add one from a folder or a `.zip` / `.skill` file (adding a skill with the same name updates it).
 
 - Models get each enabled skill's name and description. When a request fits, they load the skill's instructions, read its files, and run its scripts.
-- Scripts (`.py`, `.js`, `.ps1`, `.sh`, `.bat`, `.cmd`, `.exe`) ask before every run, unless you turn on *Run scripts without asking* for that skill (or press *Always allow*). They run in Relay's workspace folder, without a console window, for up to 5 minutes. Python scripts need Python installed, and Node scripts need Node.
+- Scripts (`.py`, `.js`, `.ps1`, `.sh`, `.bat`, `.cmd`, `.exe`) ask before every run, unless you turn on *Run scripts without asking* for that skill (or press *Always allow*). They run in Relay's workspace folder, without a console window, for up to 5 minutes. Python scripts need Python installed, and Node scripts need Node. A `.bat` or `.cmd` script never gets arguments with `& | < > ^ % ! " ( )` in them, so a model can't turn an argument into a second command.
 - The composer's **+** menu has a switch for skills and one for MCP tools, per chat.
 
 ## Web search
@@ -111,7 +111,7 @@ A skill teaches models one kind of task. It's a folder with a `SKILL.md` (a `nam
 Turn on **Web search** in the composer's **+** menu, per chat (new chats start with the switches you used last).
 
 - Claude on Anthropic's API searches and reads pages with Anthropic's own tools (billed by Anthropic per search).
-- Every other model gets Relay's two tools: a search of DuckDuckGo (its plain results page, no key or account) and a page reader that returns a page's text, in parts for long ones. They run without asking; Relay doesn't read addresses on your computer or local network.
+- Every other model gets Relay's two tools: a search of DuckDuckGo (its plain results page, no key or account) and a page reader that returns a page's text, in parts for long ones. They run without asking. Relay doesn't read addresses on your computer or local network (not through a redirect or a name that points there either), and the page reader connects directly, not through a proxy.
 
 ## Keyboard
 
@@ -129,10 +129,10 @@ Turn on **Web search** in the composer's **+** menu, per chat (new chats start w
 
 ## Privacy
 
-- Everything stays on your computer: chats live in a SQLite database in `%APPDATA%\app.relay.desktop\`, and attached files in its `attachments` folder (removed when their chat is deleted).
+- Everything stays on your computer: chats live in a SQLite database in `%APPDATA%\app.relay.desktop\`, and attached files in its `attachments` folder (removed when their chat is deleted). A deleted chat's text is wiped from the database files, not just hidden.
 - The microphone is only on while you record a voice message. Windows' microphone setting decides whether Relay may use it.
-- API keys are stored in **Windows Credential Manager** (as `Relay/provider/…`), never in Relay's files.
-- Relay only talks to the endpoints you add, plus Holster on `127.0.0.1`. With Web search on, models other than Claude search DuckDuckGo and read the pages they choose, through Relay. Remote images in replies are shown as links, not fetched.
+- API keys are stored in **Windows Credential Manager** (as `Relay/provider/…`), never in Relay's files, and only go to the server they were saved for (a server that redirects elsewhere gets an error, not your key).
+- Relay only talks to the endpoints you add, plus Holster on `127.0.0.1`. With Web search on, models other than Claude search DuckDuckGo and read the pages they choose, through Relay. Remote images in replies are shown as links, not fetched, and links open in your browser.
 
 ## Build from source
 

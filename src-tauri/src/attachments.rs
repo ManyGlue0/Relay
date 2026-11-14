@@ -427,20 +427,33 @@ fn tidy(text: &str) -> String {
     out.trim().to_string()
 }
 
+/// How much XML Relay unpacks from one Office file, in all. A document is a
+/// zip: a few MB on disk can unpack to gigabytes (a zip bomb).
+const OFFICE_XML_MAX: u64 = 64 * 1024 * 1024;
+
 /// The text of a Word document or a PowerPoint deck.
 fn office_text(path: &Path) -> Option<String> {
+    office_text_within(path, OFFICE_XML_MAX)
+}
+
+/// `office_text`, unpacking at most `budget` bytes of XML.
+fn office_text_within(path: &Path, mut budget: u64) -> Option<String> {
     let mut zip = zip::ZipArchive::new(std::fs::File::open(path).ok()?).ok()?;
-    let mut read = |name: &str| -> Option<String> {
-        let mut s = String::new();
-        zip.by_name(name).ok()?.read_to_string(&mut s).ok()?;
-        Some(s)
+    // An entry's XML, cut where the budget runs out.
+    let mut read = |zip: &mut zip::ZipArchive<std::fs::File>, name: &str| -> Option<String> {
+        let entry = zip.by_name(name).ok()?;
+        let mut bytes = Vec::new();
+        entry.take(budget).read_to_end(&mut bytes).ok()?;
+        budget -= bytes.len() as u64;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
     };
     if ext_of(&path.to_string_lossy()) == "docx" {
-        return Some(xml_text(&read("word/document.xml")?, "w:t", "w:p"));
+        return Some(xml_text(&read(&mut zip, "word/document.xml")?, "w:t", "w:p"));
     }
     let mut slides: Vec<(usize, String)> = zip
         .file_names()
         .filter_map(|n| {
+            let n = n.ok()?;
             let num = n.strip_prefix("ppt/slides/slide")?.strip_suffix(".xml")?.parse().ok()?;
             Some((num, n.to_string()))
         })
@@ -448,8 +461,7 @@ fn office_text(path: &Path) -> Option<String> {
     slides.sort();
     let mut out = String::new();
     for (num, name) in slides {
-        let mut s = String::new();
-        if zip.by_name(&name).ok()?.read_to_string(&mut s).is_ok() {
+        if let Some(s) = read(&mut zip, &name) {
             out.push_str(&format!("Slide {num}\n{}\n\n", xml_text(&s, "a:t", "a:p")));
         }
     }
@@ -846,6 +858,39 @@ mod tests {
         let xml = r#"<w:body><w:p><w:r><w:t>Hello</w:t></w:r><w:r><w:t xml:space="preserve"> &amp; bye</w:t></w:r></w:p><w:p><w:r><w:tab/><w:t>Two</w:t></w:r></w:p></w:body>"#;
         assert_eq!(xml_text(xml, "w:t", "w:p"), "Hello & bye\n\tTwo\n");
         assert_eq!(unescape("a &lt;b&gt; &#233; &#x41; & c"), "a <b> é A & c");
+    }
+
+    /// A zip at `path` with these entries.
+    fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
+        use std::io::Write as _;
+        let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        for (name, data) in entries {
+            z.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            z.write_all(data).unwrap();
+        }
+        z.finish().unwrap();
+    }
+
+    #[test]
+    fn office_files_unpack_within_a_budget() {
+        let dir = std::env::temp_dir().join(format!("relay-office-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = dir.join("ok.docx");
+        write_zip(&doc, &[("word/document.xml", br#"<w:body><w:p><w:r><w:t>Hello</w:t></w:r></w:p></w:body>"#)]);
+        assert_eq!(office_text(&doc).as_deref(), Some("Hello\n"));
+        // A small file that unpacks to 8 MB: only the budget is read.
+        let run = "<w:p><w:r><w:t>bomb</w:t></w:r></w:p>".repeat(8 * 1024 * 1024 / 38);
+        let bomb = dir.join("bomb.docx");
+        write_zip(&bomb, &[("word/document.xml", run.as_bytes())]);
+        assert!(std::fs::metadata(&bomb).unwrap().len() < 200 * 1024);
+        let text = office_text_within(&bomb, 1024 * 1024).unwrap();
+        assert!(text.len() < 200 * 1024 && text.starts_with("bomb\nbomb\n"), "{}", text.len());
+        // Slides share one budget.
+        let deck = dir.join("deck.pptx");
+        write_zip(&deck, &[("ppt/slides/slide2.xml", run.as_bytes()), ("ppt/slides/slide1.xml", b"<a:p><a:t>One</a:t></a:p>")]);
+        let text = office_text_within(&deck, 1024 * 1024).unwrap();
+        assert!(text.starts_with("Slide 1\nOne\n") && text.len() < 200 * 1024);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

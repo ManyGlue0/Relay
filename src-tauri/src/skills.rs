@@ -827,6 +827,12 @@ fn copy_dir(from: &Path, to: &Path, count: &mut usize) -> Result<(), String> {
 }
 
 fn unzip(file: &Path, to: &Path) -> Result<(), String> {
+    unzip_within(file, to, MAX_BYTES)
+}
+
+/// `unzip`, writing at most `max` bytes in all: counted as written, since the
+/// sizes a zip declares can lie.
+fn unzip_within(file: &Path, to: &Path, max: u64) -> Result<(), String> {
     use std::io::Read as _;
     let f = std::fs::File::open(file).map_err(|e| format!("Couldn't open it: {e}"))?;
     let mut zip = zip::ZipArchive::new(f).map_err(|_| "That isn't a skill folder or a .zip file".to_string())?;
@@ -859,15 +865,20 @@ fn unzip(file: &Path, to: &Path) -> Result<(), String> {
             std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
             continue;
         }
-        total += entry.size();
-        if total > MAX_BYTES {
-            return Err("That file is too big to be a skill".into());
+        let too_big = || "That file is too big to be a skill".to_string();
+        if total + entry.size() > max {
+            return Err(too_big());
         }
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let mut w = std::fs::File::create(&out).map_err(|e| e.to_string())?;
-        std::io::copy(&mut (&mut entry).take(MAX_BYTES), &mut w).map_err(|e| e.to_string())?;
+        // One byte past what's left, to tell "exactly fits" from "too big".
+        let written = std::io::copy(&mut (&mut entry).take(max - total + 1), &mut w).map_err(|e| e.to_string())?;
+        total += written;
+        if total > max {
+            return Err(too_big());
+        }
     }
     Ok(())
 }
@@ -962,5 +973,25 @@ mod tests {
         assert!(p.contains("- t: Does t") && !p.contains("run_script"));
         assert_eq!(tool_specs(&[s]).len(), 2);
         assert!(prompt_block(&[]).is_none());
+    }
+
+    #[test]
+    fn imports_stay_within_their_size() {
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join(format!("relay-unzip-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("big.zip");
+        let mut z = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        for (name, size) in [("s/SKILL.md", 10usize), ("s/a.bin", 600_000), ("s/b.bin", 600_000), ("../evil.txt", 1)] {
+            z.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            z.write_all(&vec![b'a'; size]).unwrap();
+        }
+        z.finish().unwrap();
+        assert!(unzip_within(&zip_path, &dir.join("out1"), 1_000_000).is_err());
+        unzip_within(&zip_path, &dir.join("out2"), 2_000_000).unwrap();
+        assert!(dir.join("out2/a.bin").is_file() && dir.join("out2/SKILL.md").is_file());
+        // Entries that climb out of the folder are skipped.
+        assert!(!dir.join("evil.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

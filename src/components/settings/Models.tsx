@@ -113,6 +113,27 @@ function ModelsHome() {
   );
 }
 
+/** A plain http:// address outside this computer and the local network,
+ *  where a key would travel unencrypted. */
+function unencryptedRemote(address: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(address.trim());
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "http:") return false;
+  const h = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".lan") || !h.includes(".") && !h.includes(":")) return false;
+  if (h === "::1" || /^f[cd]/.test(h) || h.startsWith("fe80:")) return false;
+  const v4 = h.split(".").map(Number);
+  if (v4.length === 4 && v4.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)) {
+    const [a, b] = v4;
+    return !(a === 127 || a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31) || (a === 169 && b === 254) || (a === 100 && b >= 64 && b < 128));
+  }
+  return true;
+}
+
 const PRESETS: { name: string; url: string; icon: string; api?: ProviderApi }[] = [
   { name: "Ollama", url: "http://localhost:11434/v1", icon: "brand:ollama" },
   { name: "LM Studio", url: "http://localhost:1234/v1", icon: "brand:lmstudio" },
@@ -277,6 +298,7 @@ function ProviderEditor({ provider }: { provider: Provider | null }) {
                   </>
                 )}
                 {provider?.hasKey && keyTouched && !key && " The saved key will be removed."}
+                {(keyTouched ? !!key.trim() : !!provider?.hasKey) && unencryptedRemote(url) && " This address isn't encrypted (http://), so the key would cross the internet readable: use https:// if the server has it."}
               </>
             }
           >

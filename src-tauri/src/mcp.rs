@@ -99,7 +99,7 @@ pub struct Mcp {
 
 fn http() -> &'static reqwest::Client {
     static C: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    C.get_or_init(|| reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).build().unwrap_or_default())
+    C.get_or_init(|| reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).redirect(crate::llm::same_origin_redirects()).build().unwrap_or_default())
 }
 
 impl Mcp {

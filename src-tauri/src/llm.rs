@@ -22,9 +22,42 @@ fn client() -> &'static reqwest::Client {
         reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .user_agent(concat!("Relay/", env!("CARGO_PKG_VERSION")))
+            .redirect(same_origin_redirects())
             .build()
             .unwrap_or_default()
     })
+}
+
+/// Requests carry an API key (`Authorization`, and `x-api-key` for
+/// Anthropic, which reqwest would keep on a redirect to another host), so a
+/// server may only redirect within its own address: same scheme, host and
+/// port. APIs don't redirect elsewhere; a server that does gets an error.
+pub(crate) fn same_origin_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let from = attempt.previous().first().map(origin);
+        if attempt.previous().len() >= 5 {
+            attempt.error("too many redirects")
+        } else if from.is_some_and(|f| f != origin(attempt.url())) {
+            let to = attempt.url().host_str().unwrap_or("").to_string();
+            attempt.error(format!("the server sent Relay to another address ({to}); use that address instead"))
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
+/// Scheme, host and port: where a key may go.
+fn origin(url: &reqwest::Url) -> (String, String, Option<u16>) {
+    let host = url.host_str().unwrap_or("").to_lowercase().replace("localhost", "127.0.0.1");
+    (url.scheme().to_string(), host, url.port_or_known_default())
+}
+
+/// Whether two base addresses are the same server (scheme, host and port).
+pub fn same_host(a: &str, b: &str) -> bool {
+    match (reqwest::Url::parse(&normalize_base(a)), reqwest::Url::parse(&normalize_base(b))) {
+        (Ok(a), Ok(b)) => origin(&a) == origin(&b),
+        _ => false,
+    }
 }
 
 pub fn normalize_base(url: &str) -> String {
@@ -69,7 +102,7 @@ pub(crate) fn connect_error(e: reqwest::Error, base: &str) -> String {
     } else if e.is_timeout() {
         "The server took too long to answer".into()
     } else {
-        e.to_string()
+        crate::web::error_chain(&e)
     }
 }
 
@@ -737,6 +770,31 @@ mod tests {
         let base = serve_once(resp.into_bytes()).await;
         let err = list_models(&base, None).await.unwrap_err();
         assert_eq!(err, "500 Internal Server Error");
+    }
+
+    #[tokio::test]
+    async fn keys_never_follow_a_redirect_elsewhere() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // Records what reaches the "other" server.
+        let other = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let other_port = other.local_addr().unwrap().port();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = other.accept().await {
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"data\":[]}").await;
+            }
+        });
+        let resp = format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:{other_port}/v1/models\r\nContent-Length: 0\r\n\r\n");
+        let base = serve_once(resp.into_bytes()).await;
+        let err = list_models(&base, Some("sk-secret")).await.unwrap_err();
+        assert!(err.contains("another address"), "{err}");
+        assert!(rx.try_recv().is_err(), "the other server was reached");
+        assert!(same_host("http://localhost:1234/v1", "http://127.0.0.1:1234"));
+        assert!(!same_host("https://api.example.com/v1", "http://api.example.com/v1"));
+        assert!(!same_host("https://api.example.com/v1", "https://evil.example/v1"));
     }
 
     #[test]

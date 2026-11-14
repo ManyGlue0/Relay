@@ -118,7 +118,7 @@ pub fn skills_open_folder(app: AppHandle, core: CoreState, which: String) -> Res
     let path = match which.as_str() {
         "" => skills::root(&core),
         "workspace" => skills::workspace(&core),
-        id if !id.contains(['/', '\\']) && id != ".." => skills::root(&core).join(id),
+        id if skills::valid_id(id) => skills::root(&core).join(id),
         _ => return Err("That isn't a folder Relay knows".into()),
     };
     std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
@@ -281,8 +281,20 @@ pub fn provider_delete(core: CoreState, id: String) -> Result<(), String> {
 /// Asks an endpoint for its models. Used to test a provider before saving it
 /// (`key` as typed, or the stored key of `id` when the field was left alone).
 #[tauri::command]
-pub async fn provider_test(base_url: String, key: Option<String>, id: Option<String>) -> Result<Vec<String>, String> {
-    let key = key.or_else(|| id.as_deref().and_then(secrets::key));
+pub async fn provider_test(core: CoreState<'_>, base_url: String, key: Option<String>, id: Option<String>) -> Result<Vec<String>, String> {
+    let key = match (key, id) {
+        (Some(k), _) => Some(k),
+        (None, Some(id)) => {
+            let stored = secrets::key(&id);
+            // A stored key only goes to the server it was saved for.
+            let saved = core.db.provider(&id)?.map(|p| p.base_url).unwrap_or_default();
+            if stored.is_some() && !llm::same_host(&saved, &base_url) {
+                return Err("The address changed: type the key again to test it there".into());
+            }
+            stored
+        }
+        (None, None) => None,
+    };
     llm::list_models(&base_url, key.as_deref()).await
 }
 
@@ -904,11 +916,4 @@ pub fn window_close(app: AppHandle, core: CoreState) {
 #[tauri::command]
 pub fn app_quit(app: AppHandle) {
     crate::quit(&app);
-}
-
-/// Saves the conversation on screen as a Markdown file.
-#[tauri::command]
-pub fn chat_export(core: CoreState, id: String, path: String) -> Result<(), String> {
-    let text = chat_markdown(core, id)?;
-    std::fs::write(&path, text).map_err(|e| format!("Couldn't save the file: {e}"))
 }

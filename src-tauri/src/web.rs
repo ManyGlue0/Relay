@@ -85,7 +85,7 @@ fn check_url(url: &reqwest::Url) -> Result<(), &'static str> {
 }
 
 /// An error with its causes ("error sending request: … the local network").
-fn error_chain(e: &dyn std::error::Error) -> String {
+pub(crate) fn error_chain(e: &dyn std::error::Error) -> String {
     let mut out = e.to_string();
     let mut cause = e.source();
     while let Some(c) = cause {

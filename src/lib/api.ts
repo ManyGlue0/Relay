@@ -428,7 +428,6 @@ export const api = {
   stop: (chatId: string) => invoke<void>("chat_stop", { chatId }),
   streamingChats: () => invoke<string[]>("streaming_chats"),
   search: (query: string) => invoke<SearchHit[]>("chat_search", { query }),
-  exportChat: (id: string, path: string) => invoke<void>("chat_export", { id, path }),
   /** `days` null: all time. */
   usage: (days: number | null) => invoke<Usage>("usage_stats", { days }),
 

@@ -225,6 +225,14 @@ pub fn valid_name(name: &str) -> bool {
         && !name.ends_with('-')
 }
 
+/// A skill's id as the UI sends it: one plain folder name inside the skills
+/// folder. Not a path (`..`, `C:x`, `\\server\share` and `/x` all are, and
+/// joining one onto the skills folder would point somewhere else).
+pub fn valid_id(id: &str) -> bool {
+    let mut parts = Path::new(id).components();
+    !id.is_empty() && !id.starts_with('.') && !id.contains(['/', '\\', ':']) && matches!((parts.next(), parts.next()), (Some(Component::Normal(_)), None))
+}
+
 /// A folder name from anything: "My PDF tool" → "my-pdf-tool".
 fn slug(s: &str) -> String {
     let mut out = String::new();
@@ -670,6 +678,9 @@ pub fn save(core: &Core, id: Option<&str>, name: &str, description: &str, body: 
     let target = root.join(name);
     let (dir, previous) = match id {
         Some(id) => {
+            if !valid_id(id) {
+                return Err("That skill was removed".into());
+            }
             let old = root.join(id);
             if !old.is_dir() {
                 return Err("That skill was removed".into());
@@ -712,7 +723,7 @@ fn rename_in_settings(core: &Core, from: &str, to: &str) {
 }
 
 pub fn delete(core: &Core, id: &str) -> Result<(), String> {
-    if id.is_empty() || id.contains(['/', '\\']) || id == "." || id == ".." {
+    if !valid_id(id) {
         return Err("That isn't a skill".into());
     }
     let dir = root(core).join(id);
@@ -926,6 +937,11 @@ mod tests {
         assert!(inside(&s, "../x").is_err());
         assert!(inside(&s, "C:/Windows/win.ini").is_err());
         let _ = std::fs::remove_dir_all(&dir);
+        // Ids from the UI are folder names, never paths.
+        assert!(valid_id("pdf-forms") && valid_id("My Skill"));
+        for bad in ["", ".", "..", ".import-x", "C:x", "C:\\Windows", "\\\\server\\share", "/etc", "a/b", "a\\b"] {
+            assert!(!valid_id(bad), "{bad}");
+        }
     }
 
     #[cfg(windows)]

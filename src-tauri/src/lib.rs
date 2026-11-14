@@ -295,7 +295,6 @@ pub fn run() {
             commands::streaming_chats,
             commands::chat_search,
             commands::chat_markdown,
-            commands::chat_export,
             commands::usage_stats,
             commands::holster_status,
             commands::holster_seen,

@@ -20,6 +20,13 @@ const PAGE_CHARS: usize = 30_000;
 /// Bytes of a page Relay downloads at most.
 const PAGE_BYTES: usize = 5 * 1024 * 1024;
 
+/// Redirects a page may take.
+const MAX_REDIRECTS: usize = 8;
+
+/// The client for pages a model asks for. It never reaches this computer or
+/// the local network: names resolve only to public addresses (`PublicOnly`,
+/// which also covers DNS rebinding), every redirect is checked again, and no
+/// proxy is used (a proxy would resolve names where Relay can't check them).
 fn client() -> &'static reqwest::Client {
     static C: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     C.get_or_init(|| {
@@ -27,10 +34,69 @@ fn client() -> &'static reqwest::Client {
             // A browser's name: some sites refuse unknown clients. Nothing about the user.
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36")
             .timeout(Duration::from_secs(25))
-            .redirect(reqwest::redirect::Policy::limited(8))
+            .redirect(redirect_policy(MAX_REDIRECTS))
+            .dns_resolver(std::sync::Arc::new(PublicOnly))
+            .no_proxy()
             .build()
-            .expect("http client")
+            .unwrap_or_default()
     })
+}
+
+/// Follows up to `max` redirects, each checked like the first address.
+fn redirect_policy(max: usize) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= max {
+            attempt.error("too many redirects")
+        } else if let Err(why) = check_url(attempt.url()) {
+            attempt.error(why)
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
+/// Resolves names to their public addresses only; a name that points only at
+/// private ones (127.0.0.1.nip.io, a rebinding domain) doesn't resolve.
+struct PublicOnly;
+
+impl reqwest::dns::Resolve for PublicOnly {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let found: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            let public: Vec<std::net::SocketAddr> = found.into_iter().filter(|a| !is_private_ip(a.ip())).collect();
+            if public.is_empty() {
+                return Err(format!("{host} is on this computer or the local network").into());
+            }
+            Ok(Box::new(public.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// Whether Relay may read this address (scheme and host as written).
+fn check_url(url: &reqwest::Url) -> Result<(), &'static str> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("Only http and https addresses can be read");
+    }
+    if is_private_host(url.host_str().unwrap_or("")) {
+        return Err("Relay doesn't read addresses on this computer or the local network");
+    }
+    Ok(())
+}
+
+/// An error with its causes ("error sending request: … the local network").
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        let text = c.to_string();
+        if !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        cause = c.source();
+    }
+    out
 }
 
 /// The tools, for the request's `tools`: (name, description, schema).
@@ -226,13 +292,8 @@ fn element_text(text: &str) -> Option<String> {
 
 async fn fetch(url: &str, start: usize) -> Result<String, String> {
     let parsed = reqwest::Url::parse(url).map_err(|_| format!("“{url}” isn't a web address"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err("Only http and https addresses can be read".into());
-    }
-    if is_private_host(parsed.host_str().unwrap_or("")) {
-        return Err("Relay doesn't read addresses on this computer or the local network".into());
-    }
-    let resp = client().get(parsed.clone()).send().await.map_err(|e| format!("Couldn't reach {url}: {e}"))?;
+    check_url(&parsed)?;
+    let resp = client().get(parsed.clone()).send().await.map_err(|e| format!("Couldn't reach {url}: {}", error_chain(&e)))?;
     let status = resp.status();
     if !status.is_success() {
         return Err(format!("{url} answered {status}"));
@@ -287,14 +348,46 @@ fn page_part(url: &str, title: &str, text: &str, start: usize) -> String {
 
 /// Loopback, private and link-local hosts, by name or literal address.
 fn is_private_host(host: &str) -> bool {
-    let host = host.trim_matches(|c| c == '[' || c == ']').to_lowercase();
+    let host = host.trim_matches(|c| c == '[' || c == ']').trim_end_matches('.').to_lowercase();
     if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") || host.ends_with(".internal") || !host.contains('.') && !host.contains(':') {
         return true;
     }
-    match host.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified() || ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]),
-        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback() || ip.is_unspecified() || (ip.segments()[0] & 0xfe00) == 0xfc00 || (ip.segments()[0] & 0xffc0) == 0xfe80,
-        Err(_) => false,
+    host.parse::<std::net::IpAddr>().is_ok_and(is_private_ip)
+}
+
+/// Addresses that aren't the public internet: loopback, private, link-local,
+/// carrier-grade NAT, multicast, reserved, and IPv6 forms that carry one of
+/// those (IPv4-mapped, IPv4-compatible, NAT64, 6to4).
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::{IpAddr, Ipv4Addr};
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, c, _] = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_documentation()
+                || a == 0
+                || a >= 240
+                || (a == 100 && (64..128).contains(&b))
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 198 && (b == 18 || b == 19))
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            let embedded = |hi: u16, lo: u16| is_private_ip(IpAddr::V4(Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)));
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (s[0] & 0xfe00) == 0xfc00 // unique local
+                || (s[0] & 0xffc0) == 0xfe80 // link-local
+                || (s[0] & 0xffc0) == 0xfec0 // site-local
+                || (s[..5] == [0; 5] && (s[5] == 0xffff || s[5] == 0) && embedded(s[6], s[7])) // ::ffff:a.b.c.d, ::a.b.c.d
+                || (s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] && embedded(s[6], s[7])) // NAT64
+                || (s[0] == 0x2002 && embedded(s[1], s[2])) // 6to4
+        }
     }
 }
 
@@ -543,12 +636,60 @@ mod tests {
 
     #[test]
     fn private_hosts() {
-        for h in ["localhost", "127.0.0.1", "10.1.2.3", "192.168.0.10", "[::1]", "router", "nas.local", "169.254.1.1"] {
+        for h in [
+            "localhost", "localhost.", "127.0.0.1", "10.1.2.3", "192.168.0.10", "[::1]", "router", "nas.local", "169.254.1.1",
+            "169.254.169.254", "0.0.0.0", "0.1.2.3", "100.64.0.1", "224.0.0.1", "255.255.255.255", "[::ffff:127.0.0.1]",
+            "[::ffff:7f00:1]", "[::ffff:192.168.1.1]", "[::127.0.0.1]", "[64:ff9b::a00:1]", "[2002:c0a8:101::]", "[fe80::1]", "[fd00::1]",
+            "[ff02::1]",
+        ] {
             assert!(is_private_host(h), "{h}");
         }
-        for h in ["example.com", "8.8.8.8", "duckduckgo.com"] {
+        for h in ["example.com", "8.8.8.8", "duckduckgo.com", "[2606:4700::1111]", "[::ffff:8.8.8.8]", "100.128.0.1"] {
             assert!(!is_private_host(h), "{h}");
         }
+    }
+
+    #[test]
+    fn urls_are_checked_as_written() {
+        let ok = |u: &str| check_url(&reqwest::Url::parse(u).unwrap()).is_ok();
+        assert!(ok("https://example.com/page"));
+        assert!(!ok("file:///C:/Windows/win.ini"));
+        // The URL parser turns these into 127.0.0.1 before Relay looks.
+        assert!(!ok("http://2130706433/"));
+        assert!(!ok("http://0x7f.1/"));
+        assert!(!ok("http://[::ffff:127.0.0.1]:11434/api/tags"));
+    }
+
+    #[tokio::test]
+    async fn names_that_point_home_dont_resolve() {
+        use reqwest::dns::Resolve;
+        use std::str::FromStr;
+        // A name that resolves to loopback (here through the hosts file), as
+        // a rebinding domain or 127.0.0.1.nip.io does through DNS.
+        let r = PublicOnly.resolve(reqwest::dns::Name::from_str("localhost").unwrap()).await;
+        assert!(r.is_err());
+    }
+
+    #[tokio::test]
+    async fn redirects_to_this_computer_are_refused() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // A server that redirects to loopback. Relay already refuses a
+        // loopback first hop, so this client uses the same redirect policy
+        // without the resolver, letting the first request through.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let reply = format!("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/secret\r\nContent-Length: 0\r\n\r\n");
+                let _ = sock.write_all(reply.as_bytes()).await;
+            }
+        });
+        let c = reqwest::Client::builder().redirect(redirect_policy(MAX_REDIRECTS)).no_proxy().build().unwrap();
+        let err = c.get(format!("http://127.0.0.1:{port}/start")).send().await.unwrap_err();
+        assert!(err.is_redirect(), "{err}");
+        assert!(error_chain(&err).contains("local network"), "{}", error_chain(&err));
     }
 
     #[test]

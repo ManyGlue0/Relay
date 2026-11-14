@@ -535,19 +535,40 @@ fn interpreter(path: &Path) -> Result<(String, Vec<String>), String> {
         "js" | "mjs" | "cjs" => ("node".into(), vec![p]),
         "ps1" => ("powershell.exe".into(), vec!["-NoProfile".into(), "-NonInteractive".into(), "-ExecutionPolicy".into(), "Bypass".into(), "-File".into(), p]),
         "sh" => ("bash".into(), vec![p]),
-        "bat" | "cmd" => ("cmd.exe".into(), vec!["/d".into(), "/c".into(), p]),
-        "exe" => (p, vec![]),
+        // Run directly, not through `cmd /c`: Rust then quotes the arguments
+        // for cmd.exe itself, and refuses ones it can't pass safely.
+        "bat" | "cmd" | "exe" => (p, vec![]),
         _ => return Err(format!("Relay doesn't know how to run .{ext} files. It runs .py, .js, .ps1, .sh, .bat, .cmd and .exe")),
     })
 }
 
+/// Characters cmd.exe acts on inside a batch file's arguments. Arguments
+/// are the model's to write, and with any of these an argument could end
+/// the script's command line and start another one (`x" & calc & "`), so a
+/// batch script never gets them.
+const BATCH_SPECIAL: &[char] = &['&', '|', '<', '>', '^', '%', '!', '"', '(', ')', '\r', '\n', '\0'];
+
+/// The program and arguments that run a script with these arguments.
+fn script_command(path: &Path, args: &[String]) -> Result<(String, Vec<String>), String> {
+    let (program, mut pre) = interpreter(path)?;
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    if ext == "bat" || ext == "cmd" {
+        if let Some(bad) = args.iter().find(|a| a.contains(BATCH_SPECIAL)) {
+            return Err(format!(
+                "Batch scripts can't take arguments with any of & | < > ^ % ! \" ( ) or line breaks, so Relay didn't run it (argument: {bad})"
+            ));
+        }
+    }
+    pre.extend(args.iter().cloned());
+    Ok((program, pre))
+}
+
 async fn run(core: &Core, skill: &Skill, path: &Path, args: &[String], input: Option<String>, token: &CancellationToken) -> Result<(String, bool), String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let (program, mut pre) = match interpreter(path) {
+    let (program, pre) = match script_command(path, args) {
         Ok(x) => x,
         Err(e) => return Ok((e, true)),
     };
-    pre.extend(args.iter().cloned());
     let cwd = workspace(core);
     std::fs::create_dir_all(&cwd).map_err(|e| e.to_string())?;
 
@@ -897,6 +918,33 @@ mod tests {
         assert!(inside(&s, "ref/a.md").is_ok());
         assert!(inside(&s, "../x").is_err());
         assert!(inside(&s, "C:/Windows/win.ini").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn batch_arguments_cant_start_other_commands() {
+        let dir = std::env::temp_dir().join(format!("relay-bat-{}", crate::db::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bat = dir.join("echo.bat");
+        std::fs::write(&bat, "@echo off\r\necho [%~1]\r\n").unwrap();
+        let output = |program: &str, args: &[String]| {
+            let out = std::process::Command::new(program).args(args).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        let evil = r#"x" & echo INJECTED & ""#.to_string();
+        // How Relay used to run batch scripts: cmd.exe reads the `&` as a
+        // command separator and runs the model's command.
+        let old = output("cmd.exe", &["/d".into(), "/c".into(), bat.to_string_lossy().to_string(), evil.clone()]);
+        assert!(old.contains("INJECTED"), "{old}");
+        // Now: refused before anything runs.
+        assert!(script_command(&bat, &[evil]).is_err());
+        assert!(script_command(&bat, &["50%".into()]).is_err());
+        // Plain arguments still go through, spaces and all.
+        let (program, args) = script_command(&bat, &["hello world".into()]).unwrap();
+        assert_eq!(output(&program, &args).trim(), "[hello world]");
+        // Other interpreters take any argument as plain text.
+        assert!(script_command(Path::new("a.py"), &[r#"x" & y"#.into()]).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1,0 +1,4 @@
+# rehype-katex pins an older KaTeX (GHSA-238p-pmpm-9mq7); use the one Relay
+# depends on directly, so replies render with a single, current KaTeX.
+overrides:
+  katex: ^0.19.1

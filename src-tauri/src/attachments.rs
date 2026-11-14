@@ -30,8 +30,10 @@ pub const MAX_BYTES: u64 = 100 * 1024 * 1024;
 const VIDEO_WHOLE_MAX: u64 = 40 * 1024 * 1024;
 /// A text file's (or a document's) text is cut here.
 const TEXT_MAX_CHARS: usize = 1_000_000;
-/// Stills a video may have.
+//// Stills a video may have.
 const MAX_FRAMES: usize = 16;
+/// Memory the PDF reader process may use.
+const PDF_READER_MEMORY: usize = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -145,7 +147,29 @@ fn clean_name(name: &str) -> String {
     if out.is_empty() || out.eq_ignore_ascii_case("x") {
         out = format!("file.{}", ext_of(name)).trim_end_matches('.').to_string();
     }
+    if is_device_name(&out) {
+        out.insert(0, '_');
+    }
     out
+}
+
+/// Names Windows keeps for devices (`CON`, `NUL.txt`, `COM1`…): a file by
+/// that name would be the device, not a file.
+fn is_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+        || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem[3..].chars().all(|c| matches!(c, '0'..='9' | '¹' | '²' | '³')))
+        || ((stem.starts_with("COM") || stem.starts_with("LPT")) && matches!(&stem[3..], "¹" | "²" | "³"))
+}
+
+/// Files that Windows runs, rather than shows, when they're opened. An
+/// attachment like that is shown in its folder instead.
+pub fn runs_when_opened(file: &str) -> bool {
+    const RUN: &[&str] = &[
+        "exe", "com", "scr", "pif", "bat", "cmd", "vbs", "vbe", "js", "jse", "wsf", "wsh", "ps1", "psm1", "msi", "msp", "hta", "cpl", "lnk", "url",
+        "reg", "jar", "msc", "scf", "inf", "application", "appref-ms", "gadget", "settingcontent-ms", "library-ms", "chm", "xll", "website",
+    ];
+    RUN.contains(&ext_of(file).as_str())
 }
 
 fn too_big(name: &str) -> String {
@@ -554,6 +578,13 @@ fn pdf_text(pdf: &Path, out: &Path) -> Option<String> {
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     let mut child = cmd.spawn().ok()?;
+    // A PDF made to blow up the reader can't take the machine's memory with
+    // it: Windows ends the reader past PDF_READER_MEMORY.
+    #[cfg(windows)]
+    let _capped = {
+        use std::os::windows::io::AsRawHandle;
+        crate::mcp::cap_memory(child.as_raw_handle() as isize, PDF_READER_MEMORY)
+    };
     let started = Instant::now();
     loop {
         match child.try_wait() {
@@ -631,6 +662,8 @@ pub fn serve(root: &Path, path: &str, range: Option<&str>) -> tauri::http::Respo
             .header(header::ACCEPT_RANGES, "bytes")
             .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
             .header(header::CACHE_CONTROL, "max-age=31536000, immutable")
+            // The type above is the type: never guess HTML out of a file.
+            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
     };
     // "bytes=a-b", "bytes=a-" (open: a few MB at a time) or "bytes=-n" (the last n).
     let wanted = range.and_then(|r| r.strip_prefix("bytes=")).and_then(|r| r.split(',').next()).and_then(|r| {
@@ -838,6 +871,14 @@ mod tests {
         assert_eq!(clean_name("..\\evil/../x:y?.txt"), "x_y_.txt");
         assert_eq!(clean_name("x"), "file");
         assert_eq!(clean_name("   "), "file");
+        // Device names get a prefix; names that merely start like one don't.
+        for (given, kept) in [("CON", "_CON"), ("nul.txt", "_nul.txt"), ("Com1.log", "_Com1.log"), ("LPT9", "_LPT9"), ("aux .md", "_aux .md"), ("COM¹.txt", "_COM¹.txt")] {
+            assert_eq!(clean_name(given), kept);
+        }
+        for name in ["console.txt", "nullable.rs", "com10.txt", "auxiliary"] {
+            assert_eq!(clean_name(name), name);
+        }
+        assert!(runs_when_opened("setup.BAT") && runs_when_opened("x.hta") && !runs_when_opened("notes.md") && !runs_when_opened("photo.png"));
     }
 
     #[test]
@@ -907,6 +948,7 @@ mod tests {
         let ok = serve(&root, &format!("/{}/{}", a.id, a.file), None);
         assert_eq!(ok.status(), 200);
         assert_eq!(ok.body(), b"hello world");
+        assert_eq!(ok.headers()["x-content-type-options"], "nosniff");
         let part = serve(&root, &format!("/{}/{}", a.id, a.file), Some("bytes=6-"));
         assert_eq!(part.status(), 206);
         assert_eq!(part.body(), b"world");

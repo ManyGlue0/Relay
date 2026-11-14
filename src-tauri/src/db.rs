@@ -488,6 +488,8 @@ impl Db {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Deleted chats are overwritten with zeros, not left in free pages.
+        conn.pragma_update(None, "secure_delete", "ON")?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version < 1 {
             conn.execute_batch(&format!("BEGIN; {SCHEMA_V1} PRAGMA user_version = 1; COMMIT;"))?;
@@ -886,7 +888,18 @@ impl Db {
     }
 
     pub fn delete_all_chats(&self) -> Result<(), String> {
-        self.with(|c| c.execute_batch("DELETE FROM messages_fts; DELETE FROM messages; DELETE FROM chats;"))
+        self.with(|c| c.execute_batch("DELETE FROM messages_fts; DELETE FROM messages; DELETE FROM chats;"))?;
+        self.scrub()
+    }
+
+    /// After a delete: the search index merges its segments (until then it
+    /// keeps a deleted message's words), and the write-ahead log, which
+    /// still holds the old pages, is emptied into the database.
+    pub fn scrub(&self) -> Result<(), String> {
+        self.with(|c| {
+            c.execute("INSERT INTO messages_fts(messages_fts) VALUES('optimize')", [])?;
+            c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        })
     }
 
     // ---- messages -------------------------------------------------------------------------
@@ -1135,6 +1148,37 @@ mod tests {
         let full = db.chat(&chat.id).unwrap().unwrap();
         assert_eq!(full.messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), ["hello there", "hi"]);
         assert_eq!(db.deepest_leaf(&a.id).unwrap(), b2.id);
+    }
+
+    #[test]
+    fn deleted_chats_leave_no_text_on_disk() {
+        let path = std::env::temp_dir().join(format!("relay-test-{}.db", new_id()));
+        let on_disk = |word: &str| {
+            let mut bytes = std::fs::read(&path).unwrap_or_default();
+            bytes.extend(std::fs::read(path.with_extension("db-wal")).unwrap_or_default());
+            bytes.windows(word.len()).any(|w| w == word.as_bytes())
+        };
+        {
+            let db = Db::open(&path).unwrap();
+            let keep = db.create_chat(None, None, &ChatOptions::default()).unwrap();
+            let gone = db.create_chat(None, None, &ChatOptions::default()).unwrap();
+            for (chat, word) in [(&keep, "keepsakeword"), (&gone, "zebracornflakes")] {
+                let m = db.add_message(&chat.id, None, "user", "", &[], None, None, "streaming").unwrap();
+                db.finish_message(&m.id, &format!("my secret is {word} {word}"), "", &json!([]), "done", None, &Value::Null).unwrap();
+            }
+            db.with(|c| c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))).unwrap();
+            assert!(on_disk("zebracornflakes"));
+            db.delete_chat(&gone.id).unwrap();
+            db.scrub().unwrap();
+            assert!(!on_disk("zebracornflakes"), "a deleted message's text is still in the files");
+            assert!(on_disk("keepsakeword"));
+            assert_eq!(db.search("keepsakeword", 10).unwrap().len(), 1);
+            db.delete_all_chats().unwrap();
+            assert!(!on_disk("keepsakeword"));
+        }
+        for ext in ["db", "db-wal", "db-shm"] {
+            let _ = std::fs::remove_file(path.with_extension(ext));
+        }
     }
 
     #[test]

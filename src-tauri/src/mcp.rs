@@ -665,11 +665,79 @@ mod job {
             }
         }
     }
+
+    /// A job of its own for one process, which Windows ends if it commits
+    /// more than `bytes` of memory, or when this is dropped.
+    pub struct Capped(isize);
+
+    impl Drop for Capped {
+        fn drop(&mut self) {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(self.0 as _);
+            }
+        }
+    }
+
+    pub fn cap_memory(process: isize, bytes: usize) -> Option<Capped> {
+        use windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return None;
+            }
+            let capped = Capped(job as isize);
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+            info.ProcessMemoryLimit = bytes;
+            let set = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const _,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            (set != 0 && AssignProcessToJobObject(job, process as _) != 0).then_some(capped)
+        }
+    }
+}
+
+/// Runs a process under a memory ceiling (see `job::cap_memory`); keep the
+/// guard until the process has ended.
+#[cfg(windows)]
+pub fn cap_memory(process: isize, bytes: usize) -> Option<job::Capped> {
+    job::cap_memory(process, bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn capped_processes_cant_pass_their_memory() {
+        use std::os::windows::io::AsRawHandle;
+        // Waits for a line on stdin (so the cap is on before it allocates),
+        // then asks for 1 GB.
+        let script = "[void][Console]::In.ReadLine(); try { $a = New-Object byte[] (1GB); $a[0] = 1; 'allocated' } catch { 'refused' }";
+        let run = |cap: Option<usize>| {
+            let mut child = std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let capped = cap.map(|bytes| cap_memory(child.as_raw_handle() as isize, bytes).expect("capped"));
+            {
+                use std::io::Write as _;
+                let mut stdin = child.stdin.take().unwrap();
+                let _ = writeln!(stdin, "go");
+            }
+            let out = child.wait_with_output().unwrap();
+            drop(capped);
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        assert_eq!(run(None), "allocated");
+        assert_eq!(run(Some(256 * 1024 * 1024)), "refused");
+    }
 
     #[test]
     fn aliases_are_api_safe() {

@@ -278,7 +278,7 @@ fn open_chat(app: &AppHandle, chat_id: String) {
 
 /// What happened to a notification (Holster tells `notify.url`).
 fn on_card_event(app: &AppHandle, event: &Value) {
-    let Some(chat) = event.get("id").and_then(Value::as_str).and_then(|id| id.strip_prefix("reply-")) else { return };
+    let Some(chat) = event.get("id").and_then(Value::as_str).and_then(|id| id.strip_prefix("reply-")).filter(|c| valid_chat_id(c)) else { return };
     if let Some(me) = HOLSTER.get() {
         me.cards.lock().unwrap().remove(chat);
     }
@@ -372,7 +372,7 @@ async fn serve(app: AppHandle) -> std::io::Result<u16> {
                         .ok()
                         .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string));
                     match id {
-                        Some(id) if id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric()) => {
+                        Some(id) if valid_chat_id(&id) => {
                             open_chat(&app, id);
                             StatusCode::NO_CONTENT
                         }
@@ -387,6 +387,12 @@ async fn serve(app: AppHandle) -> std::io::Result<u16> {
         let _ = axum::serve(listener, router).await;
     });
     Ok(port)
+}
+
+/// What a chat id can be (`db::new_id`: letters and digits). Ids that come
+/// in over the loopback port are checked before they reach the UI.
+fn valid_chat_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
 fn is_loopback_origin(origin: &str) -> bool {
@@ -425,6 +431,14 @@ mod tests {
         assert!(is_loopback_origin("http://127.0.0.1:52710"));
         assert!(!is_loopback_origin("http://127.0.0.1.evil.com"));
         assert!(!is_loopback_origin("null"));
+    }
+
+    #[test]
+    fn chat_ids_from_outside_are_checked() {
+        assert!(valid_chat_id("k3j4h5g6f7d8"));
+        for bad in ["", "../x", "a b", "<script>", &"a".repeat(65)] {
+            assert!(!valid_chat_id(bad), "{bad}");
+        }
     }
 
     #[test]

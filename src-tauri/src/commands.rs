@@ -502,7 +502,12 @@ pub fn attach_open(app: AppHandle, core: CoreState, id: String) -> Result<(), St
     use tauri_plugin_opener::OpenerExt;
     let root = files_root(&core);
     let a = attachments::load(&root, &id)?;
-    app.opener().open_path(attachments::path_of(&root, &a).to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
+    let path = attachments::path_of(&root, &a);
+    // A script or program would run, not open: show it in its folder instead.
+    if attachments::runs_when_opened(&a.file) {
+        return app.opener().reveal_item_in_dir(&path).map_err(|e| e.to_string());
+    }
+    app.opener().open_path(path.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
 }
 
 // ---- presets --------------------------------------------------------------------------
@@ -743,6 +748,11 @@ pub fn chat_delete(app: AppHandle, core: CoreState, id: String) -> Result<(), St
     core.db.delete_chat(&id)?;
     // Its files go too, unless another chat's message still holds them.
     attachments::forget(&files_root(&core), files, &core.db.attachment_ids(None)?);
+    // Its words leave the search index and the log in the background.
+    let bg = core.inner().clone();
+    std::thread::spawn(move || {
+        let _ = bg.db.scrub();
+    });
     holster::seen(&id);
     holster::publish(&app);
     Ok(())

@@ -95,6 +95,53 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// The main window, from its config, with two guards on where its page can
+/// go: it never leaves the app (`is_app_url`), and it never opens windows of
+/// its own (a middle-click or "Open link in new window" on a link a model
+/// wrote). Web links go to the browser instead.
+fn build_main_window(app: &AppHandle) -> tauri::Result<()> {
+    let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main").cloned() else {
+        return Ok(());
+    };
+    let (popups, navigations) = (app.clone(), app.clone());
+    tauri::WebviewWindowBuilder::from_config(app, &config)?
+        .on_new_window(move |url, _| {
+            open_outside(&popups, &url);
+            tauri::webview::NewWindowResponse::Deny
+        })
+        .on_navigation(move |url| {
+            let ok = is_app_url(url);
+            if !ok {
+                open_outside(&navigations, url);
+            }
+            ok
+        })
+        .build()?;
+    Ok(())
+}
+
+/// Relay's own pages: the bundled app (or, in dev builds, Vite on localhost).
+fn is_app_url(url: &tauri::Url) -> bool {
+    match url.scheme() {
+        "tauri" => true,
+        "about" => url.as_str() == "about:blank",
+        "http" | "https" => match url.host_str() {
+            Some("tauri.localhost") => true,
+            Some("localhost" | "127.0.0.1") => cfg!(debug_assertions),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// A web or mail link, in the app Windows uses for it; anything else is dropped.
+fn open_outside(app: &AppHandle, url: &tauri::Url) {
+    use tauri_plugin_opener::OpenerExt;
+    if matches!(url.scheme(), "http" | "https" | "mailto") {
+        let _ = app.opener().open_url(url.as_str(), None::<&str>);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// `relay.exe --pdf-text <pdf> <out>`: reads a PDF's text in its own process (see attachments.rs).
 pub fn pdf_text_main(pdf: &str, out: &str) {
@@ -157,6 +204,7 @@ pub fn run() {
                 core.mcp.connect(server);
             }
 
+            build_main_window(&handle)?;
             window::install(&handle, &prefs);
             let main = app.get_webview_window("main").expect("main window");
             let events_app = handle.clone();
@@ -263,4 +311,18 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_page_stays_in_the_app() {
+        let app = |u: &str| is_app_url(&tauri::Url::parse(u).unwrap());
+        assert!(app("http://tauri.localhost/index.html") && app("tauri://localhost/") && app("about:blank"));
+        for u in ["https://evil.example/login", "http://tauri.localhost.evil.example/", "file:///C:/x.html", "javascript:alert(1)", "http://relay.localhost/a/b"] {
+            assert!(!app(u), "{u}");
+        }
+    }
 }

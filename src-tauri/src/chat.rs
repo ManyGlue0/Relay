@@ -744,6 +744,29 @@ struct CallAcc {
     arguments: String,
 }
 
+/// Tool calls one round may hold. The index comes from the server: a huge
+/// one must not make Relay allocate its way out of memory.
+const MAX_CALLS: usize = 128;
+
+/// Adds a piece of a tool call (calls arrive split across chunks, by index).
+/// Pieces for an index past `MAX_CALLS` are dropped.
+fn add_call_piece(calls: &mut Vec<CallAcc>, index: usize, id: Option<String>, name: Option<String>, arguments: &str) {
+    if index >= MAX_CALLS {
+        return;
+    }
+    if calls.len() <= index {
+        calls.resize_with(index + 1, CallAcc::default);
+    }
+    let c = &mut calls[index];
+    if let Some(id) = id {
+        c.id = id;
+    }
+    if let Some(name) = name {
+        c.name = name;
+    }
+    c.arguments.push_str(arguments);
+}
+
 /// The reply's parts as they grow, the batch waiting to go to the UI, and
 /// when the reasoning in progress started.
 struct Tracker {
@@ -882,17 +905,7 @@ impl Job {
                     }
                     Event::ToolCall { index, id, name, arguments } => {
                         round_first.get_or_insert_with(Instant::now);
-                        while calls.len() <= index {
-                            calls.push(CallAcc::default());
-                        }
-                        let c = &mut calls[index];
-                        if let Some(id) = id {
-                            c.id = id;
-                        }
-                        if let Some(name) = name {
-                            c.name = name;
-                        }
-                        c.arguments.push_str(&arguments);
+                        add_call_piece(&mut calls, index, id, name, &arguments);
                     }
                     Event::Usage { prompt, completion } => round_usage = Some((prompt, completion)),
                     Event::Finish(reason) => finish = Some(reason),
@@ -1244,6 +1257,19 @@ pub fn clean_title(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_call_indexes_are_capped() {
+        let mut calls = Vec::new();
+        add_call_piece(&mut calls, 1, Some("c1".into()), Some("add".into()), "{\"a\"");
+        add_call_piece(&mut calls, 1, None, None, ":1}");
+        assert_eq!(calls.len(), 2);
+        assert_eq!((calls[1].id.as_str(), calls[1].name.as_str(), calls[1].arguments.as_str()), ("c1", "add", "{\"a\":1}"));
+        // A server-sent index of billions is ignored, not allocated.
+        add_call_piece(&mut calls, 4_000_000_000, Some("x".into()), Some("boom".into()), "{}");
+        add_call_piece(&mut calls, usize::MAX, None, None, "");
+        assert_eq!(calls.len(), 2);
+    }
 
     #[test]
     fn titles() {

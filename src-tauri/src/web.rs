@@ -218,7 +218,7 @@ fn attr_value(text: &str, name: &str) -> Option<String> {
 fn element_text(text: &str) -> Option<String> {
     let start = text.find('>')? + 1;
     let rest = &text[start..];
-    let end = rest.find("</a>").or_else(|| rest.find("</td>")).or_else(|| rest.find("</div>")).unwrap_or(rest.len().min(2000));
+    let end = rest.find("</a>").or_else(|| rest.find("</td>")).or_else(|| rest.find("</div>")).unwrap_or_else(|| floor_char(rest, 2000));
     let inner = strip_tags(&rest[..end]);
     let t = collapse(&decode_entities(&inner));
     (!t.is_empty()).then_some(t)
@@ -372,6 +372,15 @@ pub fn html_to_text(html: &str) -> (String, String) {
     (title, tidy)
 }
 
+/// The largest char boundary at or below `max`.
+fn floor_char(s: &str, max: usize) -> usize {
+    let mut i = max.min(s.len());
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 fn strip_tags(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut in_tag = false;
@@ -399,7 +408,8 @@ pub fn decode_entities(s: &str) -> String {
     while let Some(i) = rest.find('&') {
         out.push_str(&rest[..i]);
         rest = &rest[i..];
-        let Some(semi) = rest[..rest.len().min(12)].find(';') else {
+        // Bytes, not a string slice: byte 12 may fall inside a character.
+        let Some(semi) = rest.as_bytes()[..rest.len().min(12)].iter().position(|&b| b == b';') else {
             out.push('&');
             rest = &rest[1..];
             continue;
@@ -517,6 +527,18 @@ mod tests {
         let (title, text) = html_to_text(html);
         assert_eq!(title, "T & U");
         assert_eq!(text, "Menu\n\n## Hello\n\nOne two\nthree\n\n- a\n- b\n\n1 | 2");
+    }
+
+    #[test]
+    fn text_with_wide_characters_never_panics() {
+        // `&` followed by a character that straddles byte 12.
+        assert_eq!(decode_entities("&aaaaaaaaaa€ und R&D für Österreich &amp;"), "&aaaaaaaaaa€ und R&D für Österreich &");
+        assert_eq!(decode_entities("&ééééééé;"), "&ééééééé;");
+        // An element with no closing tag, cut near 2000 bytes inside a character.
+        let long = format!(">a{}", "é".repeat(1500));
+        assert_eq!(element_text(&long).map(|t| t.chars().count()), Some(1000));
+        let page = format!("<html><body><p>{}&x€€€€</p></body></html>", "ü".repeat(10));
+        assert!(html_to_text(&page).1.starts_with("üüü"));
     }
 
     #[test]

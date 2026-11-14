@@ -434,6 +434,9 @@ pub async fn complete(base: &str, key: Option<&str>, mut body: Value) -> Result<
     Ok(text)
 }
 
+/// Content blocks one reply may hold (the server says which index each is).
+const MAX_BLOCKS: usize = 1024;
+
 /// The reply as it streams: its blocks (sent back later) and the pieces of
 /// JSON that tool inputs arrive in.
 #[derive(Default)]
@@ -462,10 +465,13 @@ impl Acc {
                 self.output_tokens = n("output_tokens");
             }
             "content_block_start" => {
-                let Some(i) = index else { return Ok(false) };
-                let block = v.get("content_block").cloned().unwrap_or(Value::Null);
-                while self.blocks.len() <= i {
-                    self.blocks.push(Value::Null);
+                // The index and the block come from the server: a huge index
+                // or a block that isn't an object is dropped (writing keys into
+                // a string or number would panic).
+                let Some(i) = index.filter(|i| *i < MAX_BLOCKS) else { return Ok(false) };
+                let Some(block) = v.get("content_block").filter(|b| b.is_object()).cloned() else { return Ok(false) };
+                if self.blocks.len() <= i {
+                    self.blocks.resize(i + 1, Value::Null);
                 }
                 match block.get("type").and_then(Value::as_str).unwrap_or("") {
                     "text" => {
@@ -521,7 +527,7 @@ impl Acc {
                         append(&mut self.blocks[i], "thinking", &t);
                         on(Event::Reasoning(t));
                     }
-                    "signature_delta" => self.blocks[i]["signature"] = json!(s("signature")),
+                    "signature_delta" => set_key(&mut self.blocks[i], "signature", json!(s("signature"))),
                     "input_json_delta" => {
                         let piece = s("partial_json");
                         self.json.entry(i).or_default().push_str(&piece);
@@ -533,9 +539,11 @@ impl Acc {
                         if let Some(c) = d.get("citation") {
                             let b = &mut self.blocks[i];
                             if !b.get("citations").is_some_and(Value::is_array) {
-                                b["citations"] = json!([]);
+                                set_key(b, "citations", json!([]));
                             }
-                            b["citations"].as_array_mut().unwrap().push(c.clone());
+                            if let Some(list) = b.get_mut("citations").and_then(Value::as_array_mut) {
+                                list.push(c.clone());
+                            }
                         }
                     }
                     _ => {}
@@ -545,7 +553,7 @@ impl Acc {
                 let Some(i) = index.filter(|i| *i < self.blocks.len()) else { return Ok(false) };
                 if let Some(text) = self.json.remove(&i) {
                     let input: Value = serde_json::from_str(&text).ok().filter(Value::is_object).unwrap_or_else(|| json!({}));
-                    self.blocks[i]["input"] = input.clone();
+                    set_key(&mut self.blocks[i], "input", input.clone());
                     if self.hosted.contains(&i) {
                         let b = &self.blocks[i];
                         on(Event::Hosted {
@@ -606,7 +614,18 @@ impl Acc {
 
 fn append(block: &mut Value, key: &str, text: &str) {
     let cur = block.get(key).and_then(Value::as_str).unwrap_or("").to_string();
-    block[key] = json!(cur + text);
+    set_key(block, key, json!(cur + text));
+}
+
+/// `block[key] = value`, for blocks that are objects (or still empty); never
+/// panics on a value the server sent in another shape.
+fn set_key(block: &mut Value, key: &str, value: Value) {
+    if block.is_null() {
+        *block = json!({});
+    }
+    if let Some(obj) = block.as_object_mut() {
+        obj.insert(key.to_string(), value);
+    }
 }
 
 /// A web search's or page read's result as a few lines for its tool card.
@@ -749,6 +768,29 @@ mod tests {
         ];
         let (_, m) = convert(&raw, false);
         assert_eq!(m[1]["content"], json!([{ "type": "text", "text": "ok" }]));
+    }
+
+    #[test]
+    fn malformed_streams_neither_panic_nor_allocate() {
+        let mut acc = Acc::default();
+        let lines = [
+            // A block that isn't an object, then deltas that write keys into it.
+            r#"{"type":"content_block_start","index":0,"content_block":"x"}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"S"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"url":"u"}}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"t"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            // An index of billions.
+            r#"{"type":"content_block_start","index":4000000000,"content_block":{"type":"text","text":"no"}}"#,
+            r#"{"type":"content_block_start","index":18446744073709551615,"content_block":{"type":"tool_use","id":"t","name":"n"}}"#,
+        ];
+        for l in lines {
+            acc.event(l, &mut |_| {}).unwrap();
+        }
+        assert_eq!(acc.blocks.len(), 2);
+        assert_eq!(acc.blocks[0]["signature"], "S");
     }
 
     #[test]

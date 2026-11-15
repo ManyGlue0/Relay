@@ -29,7 +29,7 @@ import type { ChatSummary, SearchHit } from "../lib/api";
 import { rowSpring, spring } from "../lib/motion";
 import { useStore, type SettingsSection } from "../lib/store";
 import { dateGroup } from "../lib/time";
-import { MenuItem, MenuSeparator, Popover, type Anchor } from "./ui";
+import { MenuItem, MenuSeparator, Pill, Popover, type Anchor } from "./ui";
 
 export const SECTIONS: { id: SettingsSection; label: string; icon: LucideIcon }[] = [
   { id: "general", label: "General", icon: SlidersHorizontal },
@@ -78,7 +78,7 @@ function SideRow({
       aria-label={label}
       title={rail ? (keys ? `${label} (${keys})` : label) : undefined}
     >
-      {on && pill && <motion.span layoutId={pill} className="row-pill" transition={spring} />}
+      {on && pill && <Pill layoutId={pill} className="row-pill" />}
       <Icon size={16} className="side-icon" />
       <span className="side-label">{label}</span>
       {keys && <span className="side-keys">{keys}</span>}
@@ -269,7 +269,7 @@ function ChatRow({ chat }: { chat: ChatSummary }) {
       role="button"
       aria-current={active}
     >
-      {active && <motion.span layoutId="chat-pill" className="row-pill" transition={spring} />}
+      {active && <Pill layoutId="chat-pill" className="row-pill" />}
       {renaming ? <Rename chat={chat} onDone={() => setRenaming(false)} /> : <span className="chat-title">{chat.title || "New chat"}</span>}
       {streaming && <span className="live-dot" aria-label="Replying" />}
       {!renaming && (

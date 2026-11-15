@@ -69,7 +69,7 @@ Relay is a [Holster](https://github.com/ManyGlue0/Holster) app. Holster is a doc
 ## Getting started
 
 1. Open Relay and choose **Add a provider**.
-2. Pick a preset (Ollama, LM Studio, llama.cpp, vLLM, OpenAI, Anthropic, SpaceXSI, OpenRouter) or type any address ending in `/v1`.
+2. Pick a preset (Ollama, LM Studio, llama.cpp, vLLM, OpenAI, Anthropic, SpaceXSI, OpenRouter) or paste the address from the service's docs.
 3. Add an API key if the service needs one, then **Test connection**.
 4. Start typing. Optionally, tell Relay about yourself in **Settings → You**.
 
@@ -85,6 +85,8 @@ Relay is a [Holster](https://github.com/ManyGlue0/Holster) app. Holster is a doc
 | OpenRouter | `https://openrouter.ai/api/v1` |
 
 Each provider has an **API**: *OpenAI-compatible* (Chat Completions, what most servers speak) or *Anthropic* (the Messages API, for Anthropic and servers that copy it). The Anthropic preset picks *Anthropic*.
+
+The address can be pasted the way the service's docs give it: the base address (`https://api.z.ai/api/anthropic`), the one ending in `/v1`, or the full endpoint (`…/v1/messages`, `…/v1/chat/completions`). Relay shows under the field exactly where requests will go.
 
 Endpoints that don't list their models can still be used: add model ids by hand in the provider's **Models** list. Relay detects each model's context window where the server says it (llama.cpp, LM Studio, Ollama, vLLM, OpenRouter); you can also set it by hand.
 

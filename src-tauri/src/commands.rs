@@ -157,11 +157,11 @@ pub struct ProviderInput {
 #[tauri::command]
 pub fn provider_save(core: CoreState, input: ProviderInput) -> Result<Provider, String> {
     let name = input.name.trim();
-    let base_url = llm::normalize_base(&input.base_url);
+    let typed = llm::normalize_base(&input.base_url);
     if name.is_empty() {
         return Err("Give the provider a name".into());
     }
-    if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+    if !(typed.starts_with("http://") || typed.starts_with("https://")) {
         return Err("The address should start with http:// or https://".into());
     }
     let existing = match &input.id {
@@ -183,7 +183,7 @@ pub fn provider_save(core: CoreState, input: ProviderInput) -> Result<Provider, 
         caps_user: HashMap::new(),
         has_key: false,
         sort,
-        api: if base_url.contains("api.anthropic.com") { "anthropic".into() } else { "openai".into() },
+        api: if typed.contains("api.anthropic.com") { "anthropic".into() } else { "openai".into() },
     });
     if let Some(api) = input.api.as_deref() {
         if api != "openai" && api != "anthropic" {
@@ -191,6 +191,7 @@ pub fn provider_save(core: CoreState, input: ProviderInput) -> Result<Provider, 
         }
         p.api = api.to_string();
     }
+    let base_url = llm::api_base(&p.api, &typed);
     if let Some(all) = input.show_all {
         p.show_all = all;
     }
@@ -281,7 +282,9 @@ pub fn provider_delete(core: CoreState, id: String) -> Result<(), String> {
 /// Asks an endpoint for its models. Used to test a provider before saving it
 /// (`key` as typed, or the stored key of `id` when the field was left alone).
 #[tauri::command]
-pub async fn provider_test(core: CoreState<'_>, base_url: String, key: Option<String>, id: Option<String>) -> Result<Vec<String>, String> {
+pub async fn provider_test(core: CoreState<'_>, base_url: String, key: Option<String>, id: Option<String>, kind: Option<String>) -> Result<Vec<String>, String> {
+    let api = kind.filter(|k| k == "anthropic").unwrap_or_else(|| "openai".into());
+    let base_url = llm::api_base(&api, &base_url);
     let key = match (key, id) {
         (Some(k), _) => Some(k),
         (None, Some(id)) => {
@@ -295,14 +298,14 @@ pub async fn provider_test(core: CoreState<'_>, base_url: String, key: Option<St
         }
         (None, None) => None,
     };
-    llm::list_models(&base_url, key.as_deref()).await
+    llm::list_models(&api, &base_url, key.as_deref()).await
 }
 
 #[tauri::command]
 pub async fn provider_refresh(core: CoreState<'_>, id: String) -> Result<Provider, String> {
     let mut p = core.db.provider(&id)?.ok_or("That provider was removed")?;
     let key = secrets::key(&p.id);
-    p.models = llm::list_models(&p.base_url, key.as_deref()).await?;
+    p.models = llm::list_models(&p.api, &p.base_url, key.as_deref()).await?;
     p.models_at = now_ms();
     core.db.save_provider(&p)?;
     Ok(p)
@@ -334,7 +337,8 @@ pub async fn providers_probe(core: CoreState<'_>) -> Result<ProbeResult, String>
     let checks = providers.iter().map(|p| {
         let key = secrets::key(&p.id);
         let base = p.base_url.clone();
-        async move { llm::probe(&base, key.as_deref()).await }
+        let api = p.api.clone();
+        async move { llm::probe(&api, &base, key.as_deref()).await }
     });
     let answers = futures_util::future::join_all(checks).await;
     let mut changed = false;

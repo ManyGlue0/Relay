@@ -324,7 +324,9 @@ function ToolCard({ part, messageId }: { part: ToolPart; messageId: string }) {
   const args = prettyJson(part.arguments);
   const face = toolFace(part);
   return (
-    <motion.div className={`tool-card ${part.status}`} layout="position" transition={spring}>
+    // No layout animation: measured on every streamed batch, it slid the card
+    // after each scroll that followed the reply down.
+    <div className={`tool-card ${part.status}`}>
       <button className="tool-head" onClick={() => setOpen(!open)}>
         <span className="tool-well">{face.icon}</span>
         <span className="tool-name">{face.name}</span>
@@ -368,7 +370,7 @@ function ToolCard({ part, messageId }: { part: ToolPart; messageId: string }) {
           )}
         </div>
       </Fold>
-    </motion.div>
+    </div>
   );
 }
 

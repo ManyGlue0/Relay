@@ -113,6 +113,35 @@ function ModelsHome() {
   );
 }
 
+/** The base address requests build on, from what was typed: the mirror of
+ *  `llm::api_base`. A pasted endpoint loses its last part, an address with no
+ *  path gets /v1, and so does an Anthropic address that doesn't end in a version. */
+function apiBase(kind: ProviderApi, typed: string): string {
+  let b = typed.trim().replace(/\/+$/, "");
+  for (const end of ["/chat/completions", "/messages", "/models"]) {
+    if (b.length > end.length && b.toLowerCase().endsWith(end)) {
+      b = b.slice(0, -end.length).replace(/\/+$/, "");
+      break;
+    }
+  }
+  let u: URL;
+  try {
+    u = new URL(b);
+  } catch {
+    return b;
+  }
+  const last = u.pathname.split("/").pop() ?? "";
+  const bare = u.pathname.replace(/\//g, "") === "";
+  if (!u.search && (bare || (kind === "anthropic" && !/^v\d/i.test(last)))) return `${b}/v1`;
+  return b;
+}
+
+/** Where a chat's requests will go, for the address field's hint. */
+function endpointOf(kind: ProviderApi, typed: string): string | null {
+  if (!/^https?:\/\/[^/\s]+/i.test(typed.trim())) return null;
+  return apiBase(kind, typed) + (kind === "anthropic" ? "/messages" : "/chat/completions");
+}
+
 /** A plain http:// address outside this computer and the local network,
  *  where a key would travel unencrypted. */
 function unencryptedRemote(address: string): boolean {
@@ -167,6 +196,7 @@ function ProviderEditor({ provider }: { provider: Provider | null }) {
   const keyArg = keyTouched ? key.trim() : undefined;
   const models = test.state === "ok" ? test.models : (provider?.models ?? []);
   const allModels = [...new Set([...models, ...custom])];
+  const endpoint = endpointOf(apiKind, url);
 
   const runTest = async (): Promise<string[] | null> => {
     if (!url.trim()) return null;
@@ -251,7 +281,7 @@ function ProviderEditor({ provider }: { provider: Provider | null }) {
               <input className="input" value={name} placeholder="My server" aria-label="Name" onChange={(e) => setName(e.target.value)} />
             </div>
           </div>
-          <Field label="API" hint={apiKind === "anthropic" ? "Anthropic's Messages API: Claude's thinking, prompt caching and web search work fully" : "The Chat Completions API most servers speak"}>
+          <Field label="API" hint={apiKind === "anthropic" ? "The Messages API of Anthropic and services compatible with it: Claude's thinking, prompt caching and web search work fully" : "The Chat Completions API most servers speak"}>
             <Segmented
               id="provider-api"
               value={apiKind}
@@ -265,11 +295,24 @@ function ProviderEditor({ provider }: { provider: Provider | null }) {
               }}
             />
           </Field>
-          <Field label="Address" hint="The base address, usually ending in /v1">
+          <Field
+            label="Address"
+            hint={
+              endpoint ? (
+                <>
+                  Requests go to <span className="endpoint">{endpoint}</span>
+                </>
+              ) : apiKind === "anthropic" ? (
+                "From the service's docs, with or without /v1/messages at the end"
+              ) : (
+                "From the server's docs, usually ending in /v1 (a full address ending in /chat/completions works too)"
+              )
+            }
+          >
             <input
               className="input"
               value={url}
-              placeholder="http://localhost:11434/v1"
+              placeholder={apiKind === "anthropic" ? "https://api.anthropic.com/v1" : "http://localhost:11434/v1"}
               spellCheck={false}
               onChange={(e) => {
                 setUrl(e.target.value);

@@ -5,6 +5,32 @@ import { createPortal } from "react-dom";
 import { spring } from "../lib/motion";
 import { useEscape, useStore } from "../lib/store";
 
+// ---- selection pill ---------------------------------------------------------------
+
+/** A selection pill that slides to the newly selected row (a shared
+ *  `layoutId`), then stays put inside it. framer-motion measures a layout node
+ *  on every render and animates any change, always starting one frame late, so
+ *  a pill that kept measuring trailed its row whenever the row resized or
+ *  moved (the sidebar dragged wider). Once it has arrived, a fixed
+ *  `layoutDependency` stops that: CSS keeps it on its row. */
+export function Pill({ layoutId, className }: { layoutId: string; className: string }) {
+  const [settled, setSettled] = useState(false);
+  // A pill that appears without sliding (the first selection) never completes an animation.
+  useEffect(() => {
+    const t = window.setTimeout(() => setSettled(true), 800);
+    return () => window.clearTimeout(t);
+  }, []);
+  return (
+    <motion.span
+      layoutId={layoutId}
+      className={className}
+      transition={spring}
+      layoutDependency={settled ? "settled" : undefined}
+      onLayoutAnimationComplete={() => setSettled(true)}
+    />
+  );
+}
+
 // ---- buttons ----------------------------------------------------------------------
 
 type IconButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string; active?: boolean; size?: "small" | "tiny" };
@@ -305,7 +331,7 @@ export function Segmented<T extends string>({
     <div className="segmented">
       {options.map((o) => (
         <button key={o.value} className={o.value === value ? "on" : ""} onClick={() => onChange(o.value)}>
-          {o.value === value && <motion.span layoutId={`seg-${id}`} className="segmented-pill" transition={spring} />}
+          {o.value === value && <Pill layoutId={`seg-${id}`} className="segmented-pill" />}
           <span>{o.label}</span>
         </button>
       ))}

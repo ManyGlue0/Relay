@@ -60,8 +60,36 @@ pub fn same_host(a: &str, b: &str) -> bool {
     }
 }
 
+/// The address without spaces, a trailing slash, or a pasted endpoint
+/// (`…/chat/completions`, `…/messages`, `…/models`): requests add their own.
 pub fn normalize_base(url: &str) -> String {
-    url.trim().trim_end_matches('/').to_string()
+    let mut b = url.trim().trim_end_matches('/');
+    for end in ["/chat/completions", "/messages", "/models"] {
+        if b.len() > end.len() && b.is_char_boundary(b.len() - end.len()) && b[b.len() - end.len()..].eq_ignore_ascii_case(end) {
+            b = b[..b.len() - end.len()].trim_end_matches('/');
+            break;
+        }
+    }
+    b.to_string()
+}
+
+/// The base address requests build on, from what the user typed (the UI's
+/// `apiBase` mirrors it). A pasted endpoint loses its last part; an address
+/// with no path gets `/v1`, where every local server and OpenAI keep it; and
+/// for the Anthropic API a path that doesn't end in a version gets `/v1`,
+/// because Anthropic-compatible services publish the address the SDK adds
+/// `/v1/messages` to (`https://api.z.ai/api/anthropic`).
+pub fn api_base(api: &str, url: &str) -> String {
+    let b = normalize_base(url);
+    let Ok(parsed) = reqwest::Url::parse(&b) else { return b };
+    let last = parsed.path_segments().and_then(|mut s| s.next_back()).unwrap_or("");
+    let versioned = last.len() > 1 && last.starts_with(['v', 'V']) && last[1..].starts_with(|c: char| c.is_ascii_digit());
+    let bare = parsed.path().trim_matches('/').is_empty();
+    if parsed.query().is_none() && (bare || (api == "anthropic" && !versioned)) {
+        format!("{b}/v1")
+    } else {
+        b
+    }
 }
 
 fn request(method: reqwest::Method, base: &str, path: &str, key: Option<&str>) -> reqwest::RequestBuilder {
@@ -114,8 +142,8 @@ enum ListError {
 }
 
 /// The ids the endpoint offers, sorted.
-pub async fn list_models(base: &str, key: Option<&str>) -> Result<Vec<String>, String> {
-    models_of(base, key, Duration::from_secs(15)).await.map_err(|e| match e {
+pub async fn list_models(api: &str, base: &str, key: Option<&str>) -> Result<Vec<String>, String> {
+    models_of(api, base, key, Duration::from_secs(15)).await.map_err(|e| match e {
         ListError::Unreachable(m) | ListError::Answered(m) => m,
     })
 }
@@ -123,16 +151,24 @@ pub async fn list_models(base: &str, key: Option<&str>) -> Result<Vec<String>, S
 /// Is the server there right now, and what does it list? `(false, None)`:
 /// unreachable. `(true, None)`: it answered but lists no models (some
 /// servers don't), so models added by name count as available.
-pub async fn probe(base: &str, key: Option<&str>) -> (bool, Option<Vec<String>>) {
-    match models_of(base, key, Duration::from_secs(5)).await {
+pub async fn probe(api: &str, base: &str, key: Option<&str>) -> (bool, Option<Vec<String>>) {
+    match models_of(api, base, key, Duration::from_secs(5)).await {
         Ok(ids) => (true, Some(ids)),
         Err(ListError::Unreachable(_)) => (false, None),
         Err(ListError::Answered(_)) => (true, None),
     }
 }
 
-async fn models_of(base: &str, key: Option<&str>, timeout: Duration) -> Result<Vec<String>, ListError> {
-    let resp = request(reqwest::Method::GET, base, "/models", key)
+async fn models_of(api: &str, base: &str, key: Option<&str>, timeout: Duration) -> Result<Vec<String>, ListError> {
+    let mut req = request(reqwest::Method::GET, base, "/models", key);
+    // Servers that copy the Messages API take its headers for the list too.
+    if api == "anthropic" && !normalize_base(base).contains("api.anthropic.com") {
+        req = req.header("anthropic-version", crate::anthropic::VERSION);
+        if let Some(key) = key.filter(|k| !k.is_empty()) {
+            req = req.header("x-api-key", key);
+        }
+    }
+    let resp = req
         .timeout(timeout)
         .send()
         .await
@@ -768,7 +804,7 @@ mod tests {
         let body = "x".repeat(1024 * 1024);
         let resp = format!("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n{body}");
         let base = serve_once(resp.into_bytes()).await;
-        let err = list_models(&base, None).await.unwrap_err();
+        let err = list_models("openai", &base, None).await.unwrap_err();
         assert_eq!(err, "500 Internal Server Error");
     }
 
@@ -789,7 +825,7 @@ mod tests {
         });
         let resp = format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:{other_port}/v1/models\r\nContent-Length: 0\r\n\r\n");
         let base = serve_once(resp.into_bytes()).await;
-        let err = list_models(&base, Some("sk-secret")).await.unwrap_err();
+        let err = list_models("openai", &base, Some("sk-secret")).await.unwrap_err();
         assert!(err.contains("another address"), "{err}");
         assert!(rx.try_recv().is_err(), "the other server was reached");
         assert!(same_host("http://localhost:1234/v1", "http://127.0.0.1:1234"));
@@ -828,5 +864,24 @@ mod tests {
             ["r:hmm", "c:Hi", "f:stop", "u:5/2", "t:0:Some(\"c1\"):Some(\"web__search\"):{\"q\"", "t:0:None:None::1}"]
         );
         assert_eq!(root_of("http://localhost:8080/v1/"), "http://localhost:8080");
+    }
+
+    #[test]
+    fn addresses_take_any_form() {
+        // Pasted endpoints lose their last part.
+        assert_eq!(api_base("anthropic", "https://api.anthropic.com/v1/messages"), "https://api.anthropic.com/v1");
+        assert_eq!(api_base("openai", "http://localhost:1234/v1/chat/completions/"), "http://localhost:1234/v1");
+        assert_eq!(api_base("openai", " https://openrouter.ai/api/v1/models "), "https://openrouter.ai/api/v1");
+        // Anthropic-compatible services publish the address without the version.
+        assert_eq!(api_base("anthropic", "https://api.z.ai/api/anthropic"), "https://api.z.ai/api/anthropic/v1");
+        assert_eq!(api_base("anthropic", "https://api.anthropic.com"), "https://api.anthropic.com/v1");
+        assert_eq!(api_base("anthropic", "https://api.anthropic.com/v1"), "https://api.anthropic.com/v1");
+        // OpenAI-compatible paths vary, so only an address with no path gets /v1.
+        assert_eq!(api_base("openai", "http://localhost:11434"), "http://localhost:11434/v1");
+        assert_eq!(api_base("openai", "https://api.z.ai/api/paas/v4"), "https://api.z.ai/api/paas/v4");
+        assert_eq!(api_base("openai", "https://example.com/openai"), "https://example.com/openai");
+        // Stored addresses that ended in an endpoint still work.
+        assert_eq!(normalize_base("http://x/v1/messages"), "http://x/v1");
+        assert_eq!(normalize_base("http://x/messages"), "http://x");
     }
 }

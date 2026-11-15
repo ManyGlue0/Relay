@@ -40,7 +40,9 @@ const MAX_TOKENS_CAP: u64 = 64_000;
 /// The extras dropped step by step after a rejection (see `build`).
 const LAST_STEP: u8 = 4;
 
-fn is_first_party(base: &str) -> bool {
+/// Anthropic's own API, which has the server tools (web search and fetch)
+/// and the first-party extras; servers that copy the Messages API don't.
+pub fn is_first_party(base: &str) -> bool {
     llm::normalize_base(base).contains("api.anthropic.com")
 }
 

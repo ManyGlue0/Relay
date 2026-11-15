@@ -615,9 +615,12 @@ pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &s
         .or_else(|| preset.as_ref().and_then(|p| p.effort.clone()))
         .unwrap_or_else(|| settings.default_effort.clone());
     let skills = if chat.summary.skills { skills::usable(&core) } else { Vec::new() };
-    // Claude on Anthropic's API searches with Anthropic's own tools (`_web` below).
     let native_api = provider.api == "anthropic";
-    let (specs, routes) = tool_specs(&core, &skills, chat.summary.web && !native_api, chat.summary.tools);
+    // Claude on Anthropic's own API searches with Anthropic's server tools
+    // (`_web` below). Servers that copy the Messages API don't have those, so
+    // their models get Relay's web tools, like every other model.
+    let hosted_web = native_api && crate::anthropic::is_first_party(&provider.base_url);
+    let (specs, routes) = tool_specs(&core, &skills, chat.summary.web && !hosted_web, chat.summary.tools);
 
     let mut messages: Vec<Value> = Vec::new();
     let mut system = system_prompt(&core, preset.as_ref(), &chat.system_prompt);
@@ -654,7 +657,7 @@ pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &s
         // For `anthropic`, which builds its own request (never sent as they are).
         body["_effort"] = json!(effort);
         body["_cache"] = json!(settings.anthropic_cache);
-        body["_web"] = json!(chat.summary.web);
+        body["_web"] = json!(chat.summary.web && hosted_web);
     }
 
     // The first exchange names the chat (unless the user named it already).

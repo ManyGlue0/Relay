@@ -26,7 +26,7 @@
 
 - **Any OpenAI-compatible endpoint, and Anthropic's own API.** Ollama, LM Studio, llama.cpp, vLLM, OpenAI, OpenRouter, or your own server. Add it once with its address, test the connection, and its models show up in the picker. A server with more models than you want (LM Studio) can show only the ones you pick. Each provider shows its service's logo, or an icon or image you choose.
 - **Claude, natively.** Providers set to *Anthropic* use the Messages API: Claude's thinking shows as a readable summary, signed thinking and web search results carry over between messages, and the conversation stays in Anthropic's prompt cache (5 minutes or an hour, your choice).
-- **Web search, for every model.** One switch per chat. Claude uses Anthropic's own web search and page reading; every other model gets Relay's: DuckDuckGo results and pages read as text, no key or account needed.
+- **Web search, for every model.** One switch per chat. Claude on Anthropic's API uses Anthropic's own web search and page reading; every other model gets Relay's (services that copy Anthropic's API too): DuckDuckGo results and pages read as text, no key or account needed.
 - **Files, pictures, sound and video.** Add files from the composer's **+** menu, drop files on the chat, or paste a screenshot. Each model gets everything it can take: images as images, audio as audio, video whole to models that watch video (else as stills, plus its sound for models that hear), PDFs as files where the server reads them (else their text; scans without text go as their pages, as images), and Word, PowerPoint, code and text files as text. Click any file to see it in Relay: images and videos big, code and text in a text box, PDFs page by page. Relay knows what each model takes where the server says (LM Studio, Ollama, llama.cpp, OpenRouter) or from its name, warns before you send something it may not take, and lets you correct it per model.
 - **Voice messages.** Press the mic, talk, press it again: the recording goes to the model as audio, so a model that hears gets your voice itself, not a transcript.
 - **Knows what's online.** The model picker checks your servers each time it opens: models that can't answer right now wait in a folded *Offline* section, and new models on a server appear by themselves.
@@ -112,8 +112,8 @@ A skill teaches models one kind of task. It's a folder with a `SKILL.md` (a `nam
 
 Turn on **Web search** in the composer's **+** menu, per chat (new chats start with the switches you used last).
 
-- Claude on Anthropic's API searches and reads pages with Anthropic's own tools (billed by Anthropic per search).
-- Every other model gets Relay's two tools: a search of DuckDuckGo (its plain results page, no key or account) and a page reader that returns a page's text, in parts for long ones. They run without asking. Relay doesn't read addresses on your computer or local network (not through a redirect or a name that points there either), and the page reader connects directly, not through a proxy.
+- Claude on Anthropic's API (api.anthropic.com) searches and reads pages with Anthropic's own tools (billed by Anthropic per search).
+- Every other model gets Relay's two tools, including models on other services that speak Anthropic's API: a search of DuckDuckGo (its plain results page, no key or account) and a page reader that returns a page's text, in parts for long ones. They run without asking. Relay doesn't read addresses on your computer or local network (not through a redirect or a name that points there either), and the page reader connects directly, not through a proxy.
 
 ## Keyboard
 

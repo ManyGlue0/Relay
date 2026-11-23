@@ -114,6 +114,27 @@ Agent tools live on a new route server `relay.agent` / `Agent` (like
 - Web search, MCP servers and skills are offered in sessions too, under their
   switches, exactly as in chats.
 
+### Models that can't call tools
+
+A model without tool calling can't work in Agent mode, and its failure is
+misleading: it writes "I've updated `main.py`" (or a fake tool call as text)
+while nothing happened. So Relay knows which models call tools:
+
+- **A new ability, `tools`,** beside vision, audio, video and PDF (`Caps`),
+  detected, guessed and overridable with the same "It can" switch in
+  Settings → Models.
+- **Detected from the server first,** for free, when the model is added: Ollama's
+  `capabilities` (`tools`), OpenRouter's `supported_parameters`, LM Studio's
+  `trained_for_tool_use`, llama.cpp's chat template (`/props`) handling tools.
+- **Else checked with one tiny request** the first time the model is picked in
+  Agent mode (and with a "Check" button in Settings → Models): a `ping` tool
+  and "Call the ping tool." A tool call means yes; a 400/422 about tools means
+  no; plain text means no (marked as a guess, the switch can say otherwise).
+  Not at add time for every listed model: on a local server that would load
+  each model in turn, and on paid APIs it costs a request per model.
+- **In Agent's model picker,** models that can't call tools carry a small
+  "no tools" badge. They aren't hidden or blocked.
+
 ### AskUserQuestion (`agent__ask_user`)
 
 - One to four questions, each with two to four options (label and a short
@@ -133,19 +154,20 @@ session; a new session starts with the mode used last.
 |---|---|---|---|---|
 | Read files in the folder | runs | runs | runs | runs |
 | Write / edit files in the folder | asks | runs | runs | runs |
-| Delete in the folder | asks | asks (a delete isn't an edit) | refused | runs |
+| Delete in the folder | asks | runs (checkpoints undo it) | refused | runs |
 | Commands | ask | ask | run if the rules allow, else refused | run |
 | Anything outside the folder | asks | asks | rules (below) | runs |
 | Web, MCP, skills | their own policies | their own policies | their own policies, "ask" counts as refused | run |
 | Checkpoints | yes | yes | yes | yes |
 | Secrets hidden from commands | no | no | yes | no |
-| Reading credential locations | asks | asks | refused | runs |
+| Reading credential locations | asks | asks | refused | refused |
 
-- **Bypass** is full risk, by decision: it runs everything, credentials
-  included, and shows the chip in the warning color while on. Its risk worth
-  knowing is prompt injection: a web page, an MCP result or a file in the
-  folder can tell the model to do something, and in Bypass nothing stands in
-  the way.
+- **Bypass** runs everything, with one exception: reading credential
+  locations stays refused. The reason is prompt injection: a web page, an MCP
+  result or a README in a cloned repository can tell the model to read
+  `~/.ssh/id_rsa` and send it somewhere, and small models often comply. No
+  normal work reads credentials, so the rule costs nothing. Bypass shows the
+  chip in the warning color while on.
 - In **Ask** modes, an approval card for a command that Auto would refuse says
   so ("Auto would refuse this: deletes files"), so the rules teach themselves.
 
@@ -304,7 +326,7 @@ Don't try another way to do the same thing: carry on with the rest of the task.
 - **Reads by compiled programs** of credential files aren't seen.
 - The guards target accidents. A model writing deliberately disguised code can
   get around static checks (the Python hook still holds).
-- **Bypass** has no guard at all (see Permission modes).
+- **Bypass** guards nothing but credential reads (see Permission modes).
 
 ## Checkpoints
 
@@ -424,16 +446,14 @@ Each step ends in something Andrea can test on its own.
 
 1. Long-running processes: yes, in 0.7.0 (`background: true`, `agent__processes`).
 2. Changing folder mid-session: no.
-3. Accept edits: deletes still ask.
-4. Models without tool calling: no gating; they fail visibly and the user picks
-   another model.
-5. Bypass: full risk, credentials included.
+3. Accept edits: deletes in the folder run too (checkpoints undo them).
+4. Models without tool calling: known (detected or checked), badged, not
+   blocked (see "Models that can't call tools").
+5. Bypass: runs everything except reading credentials (prompt injection).
 6. The agent icon: try a code mark (Lucide `code-xml`, as in Claude Desktop)
    and a robot face (`bot`) on screen beside the chat bubble, measure the
    optical centering, pick one.
 
 ## Still open
 
-- A small "no tools" badge in Agent's model picker for models the server says
-  can't call tools (Ollama's `capabilities`, OpenRouter's
-  `supported_parameters`), without blocking them.
+Nothing for now: new questions go here.

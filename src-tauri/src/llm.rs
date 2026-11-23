@@ -262,13 +262,27 @@ pub fn continue_note() -> Value {
     json!({ "role": "user", "content": CONTINUE_NOTE })
 }
 
-/// Servers known to answer a half-written answer with a new one instead of
-/// going on (no error to learn from).
-fn ignores_prefill(base: &str) -> bool {
-    reqwest::Url::parse(&normalize_base(base))
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
-        .is_some_and(|h| h == "api.openai.com")
+/// Whether the server is an engine known to go on from a half-written answer
+/// at the end of the conversation: llama.cpp (it answers `/props`), vLLM (its
+/// models are `owned_by: vllm`; `continue_final_message` asks it to) or
+/// Ollama (`/api/version`). Others may take one without an error and quietly
+/// start a new answer after it (OpenAI's API does), so they get the note.
+/// Asked once per address.
+async fn continues_answers(base: &str, key: Option<&str>) -> bool {
+    static SEEN: OnceLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(Default::default);
+    let root = root_of(base);
+    if let Some(&known) = seen.lock().unwrap().get(&root) {
+        return known;
+    }
+    let llama = get_json(format!("{root}/props"), key).await.is_some_and(|v| v.get("default_generation_settings").is_some());
+    let known = llama
+        || get_json(format!("{}/models", normalize_base(base)), key).await.is_some_and(|v| {
+            v.get("data").and_then(Value::as_array).is_some_and(|l| l.iter().any(|m| m.get("owned_by").and_then(Value::as_str) == Some("vllm")))
+        })
+        || get_json(format!("{root}/api/version"), key).await.is_some_and(|v| v.get("version").is_some());
+    seen.lock().unwrap().insert(root, known);
+    known
 }
 
 /// A Continue request that ended with the half-written answer, asking with
@@ -354,7 +368,8 @@ pub async fn stream_chat(
     let memo = format!("{}|{}", normalize_base(base), body.get("model").and_then(Value::as_str).unwrap_or(""));
     // Where the server refuses it, the same request asks with the note.
     let mut asking = prefill.then(|| ask_to_continue(&body));
-    if prefill && (ignores_prefill(base) || no_prefill().lock().unwrap().contains(&memo)) {
+    let refused = no_prefill().lock().unwrap().contains(&memo);
+    if prefill && (refused || !continues_answers(base, key).await) {
         body = asking.take().unwrap_or(body);
     }
     if plain_only().lock().unwrap().contains(&memo) {
@@ -959,8 +974,6 @@ mod tests {
         assert_eq!(m.len(), 3);
         assert_eq!(m[1]["content"], "Hello wor");
         assert_eq!(m[2], continue_note());
-        assert!(ignores_prefill("https://api.openai.com/v1"));
-        assert!(!ignores_prefill("http://localhost:8080/v1"));
         // The vLLM switches are dropped with the other extras on a 400.
         for f in ["continue_final_message", "add_generation_prompt"] {
             assert!(OPTIONAL_FIELDS.contains(&f));

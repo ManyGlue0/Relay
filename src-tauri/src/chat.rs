@@ -1102,13 +1102,16 @@ impl Job {
             let mut round_usage: Option<(u64, u64)> = None;
             let mut round_native: Option<Vec<Value>> = None;
             let mut hosted: HashMap<String, Part> = HashMap::new();
+            // Going on from cut-off text, the model's thinking (how to pick up) stays
+            // out of the message: it would split the text in two on screen.
+            let quiet = round == 0 && resume.is_some_and(|r| r.merged);
 
             let result = llm::stream_chat(&self.api, &self.base, self.key.as_deref(), body, &self.token, |event| {
                 match event {
                     Event::Content(text) => {
                         round_first.get_or_insert_with(Instant::now);
                         let (c, r) = split.feed(&text);
-                        if !r.is_empty() {
+                        if !r.is_empty() && !quiet {
                             round_thought.push_str(&r);
                             tr.op(Op::Append { kind: "reasoning", text: r });
                         }
@@ -1119,8 +1122,10 @@ impl Job {
                     }
                     Event::Reasoning(text) => {
                         round_first.get_or_insert_with(Instant::now);
-                        round_thought.push_str(&text);
-                        tr.op(Op::Append { kind: "reasoning", text });
+                        if !quiet {
+                            round_thought.push_str(&text);
+                            tr.op(Op::Append { kind: "reasoning", text });
+                        }
                     }
                     Event::ToolCall { index, id, name, arguments } => {
                         round_first.get_or_insert_with(Instant::now);
@@ -1161,7 +1166,7 @@ impl Job {
             .await;
 
             let (c, r) = split.finish();
-            if !r.is_empty() {
+            if !r.is_empty() && !quiet {
                 round_thought.push_str(&r);
                 tr.op(Op::Append { kind: "reasoning", text: r });
             }

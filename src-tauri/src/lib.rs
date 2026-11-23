@@ -290,6 +290,7 @@ pub fn run() {
             commands::chat_send,
             commands::chat_edit,
             commands::chat_regenerate,
+            commands::chat_continue,
             commands::chat_branch,
             commands::chat_stop,
             commands::streaming_chats,

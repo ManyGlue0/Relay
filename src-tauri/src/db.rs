@@ -975,6 +975,14 @@ impl Db {
     /// A reply's blocks as an Anthropic server sent them, one list per round
     /// (with the model that wrote them), so the next request can send them
     /// back unchanged: thinking only counts with its signature.
+    /// A reply that goes on (Continue): streaming again, from `parts`.
+    pub fn restart_message(&self, id: &str, parts: &Value) -> Result<(), String> {
+        self.with(|c| {
+            c.execute("UPDATE messages SET status = 'streaming', error = NULL, parts = ?2 WHERE id = ?1", params![id, parts.to_string()])
+                .map(|_| ())
+        })
+    }
+
     pub fn set_native(&self, id: &str, native: &Value) -> Result<(), String> {
         self.with(|c| c.execute("UPDATE messages SET native = ?2 WHERE id = ?1", params![id, native.to_string()]).map(|_| ()))
     }

@@ -858,6 +858,13 @@ pub fn chat_regenerate(
     reloaded(&core, &chat_id)
 }
 
+/// Continue: a reply that didn't finish goes on in the same message.
+#[tauri::command]
+pub fn chat_continue(app: AppHandle, core: CoreState, chat_id: String, message_id: String) -> Result<Chat, String> {
+    chat::continue_reply(&app, &chat_id, &message_id)?;
+    reloaded(&core, &chat_id)
+}
+
 /// Shows another branch: the newest conversation that runs through `message_id`.
 #[tauri::command]
 pub fn chat_branch(core: CoreState, chat_id: String, message_id: String) -> Result<Chat, String> {

@@ -18,6 +18,7 @@ import {
   ShieldQuestion,
   Square,
   SquareTerminal,
+  StepForward,
   Wrench,
 } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
@@ -115,6 +116,11 @@ function AssistantMessage({ message, busy }: { message: Message; busy: boolean }
   const parts = partsOf(message);
   const waiting = streaming && parts.length === 0;
   const showStats = useStore((s) => s.settings?.showStats ?? true);
+  // Continue: only the last reply on screen, and only one that didn't finish
+  // but has something to go on from.
+  const last = useStore((s) => s.current?.leafId === message.id);
+  const unfinished = message.status === "stopped" || message.status === "error" || message.stats?.finishReason === "length";
+  const canContinue = last && unfinished && (parts.length > 0 || !!message.content);
   return (
     <div className={`msg msg-assistant ${streaming ? "streaming" : ""}`}>
       {parts.map((p, i) => {
@@ -142,6 +148,11 @@ function AssistantMessage({ message, busy }: { message: Message; busy: boolean }
           <div className="msg-actions">
             <Branches message={message} disabled={busy} />
             {message.content && <CopyButton text={message.content} />}
+            {canContinue && (
+              <IconButton size="tiny" label="Continue" disabled={busy} onClick={() => void useStore.getState().continueReply(message.id)}>
+                <StepForward size={13} />
+              </IconButton>
+            )}
             <Regenerate message={message} disabled={busy} />
             <SentAgo ms={message.createdAt} />
           </div>

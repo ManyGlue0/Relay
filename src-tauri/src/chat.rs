@@ -115,9 +115,11 @@ struct Delta<'a> {
 }
 
 impl Streams {
-    fn start(&self, message_id: &str, chat_id: &str) -> CancellationToken {
+    /// A reply starts: `parts` is what it begins with (empty, or the parts of
+    /// a reply that goes on).
+    fn start(&self, message_id: &str, chat_id: &str, parts: Vec<Part>) -> CancellationToken {
         let token = CancellationToken::new();
-        let live = Live { chat_id: chat_id.to_string(), token: token.clone(), parts: Vec::new(), seq: 0, approvals: HashMap::new() };
+        let live = Live { chat_id: chat_id.to_string(), token: token.clone(), parts, seq: 0, approvals: HashMap::new() };
         self.running.lock().unwrap().insert(message_id.to_string(), live);
         token
     }
@@ -596,15 +598,20 @@ fn tool_specs(core: &Core, skills: &[Skill], web: bool, mcp: bool) -> (Vec<Value
 }
 
 /// Starts an assistant reply under `parent` (a user message).
-pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &str, model: &str) -> Result<Message, String> {
-    let core = core(app);
+/// A reply's request before it's sent: the conversation, the fields, the tools.
+struct Prepared {
+    provider: Provider,
+    body: Value,
+    messages: Vec<Value>,
+    specs: Vec<Value>,
+    routes: HashMap<String, ToolRoute>,
+    settings: crate::settings::Settings,
+}
+
+/// Builds the request for a reply to `history` (which ends with the message
+/// to answer, or with the reply that goes on).
+fn prepare(core: &Core, chat: &crate::db::Chat, history: &[Message], provider_id: &str, model: &str) -> Result<Prepared, String> {
     let provider = core.db.provider(provider_id)?.ok_or("That provider was removed. Pick another model.")?;
-    let chat = core.db.chat(chat_id)?.ok_or("That chat no longer exists")?;
-    // A new reply (sent, edited or asked again) brings an archived chat back.
-    if chat.summary.archived {
-        core.db.set_archived(chat_id, false)?;
-    }
-    let history = core.db.path_to(parent)?;
     let settings = core.prefs.get();
     let preset = chat.summary.preset_id.as_deref().and_then(|id| core.db.preset(id).ok().flatten());
     // The chat's own choice wins, then the preset's, then the default.
@@ -614,16 +621,16 @@ pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &s
         .clone()
         .or_else(|| preset.as_ref().and_then(|p| p.effort.clone()))
         .unwrap_or_else(|| settings.default_effort.clone());
-    let skills = if chat.summary.skills { skills::usable(&core) } else { Vec::new() };
+    let skills = if chat.summary.skills { skills::usable(core) } else { Vec::new() };
     let native_api = provider.api == "anthropic";
     // Claude on Anthropic's own API searches with Anthropic's server tools
     // (`_web` below). Servers that copy the Messages API don't have those, so
     // their models get Relay's web tools, like every other model.
     let hosted_web = native_api && crate::anthropic::is_first_party(&provider.base_url);
-    let (specs, routes) = tool_specs(&core, &skills, chat.summary.web && !hosted_web, chat.summary.tools);
+    let (specs, routes) = tool_specs(core, &skills, chat.summary.web && !hosted_web, chat.summary.tools);
 
     let mut messages: Vec<Value> = Vec::new();
-    let mut system = system_prompt(&core, preset.as_ref(), &chat.system_prompt);
+    let mut system = system_prompt(core, preset.as_ref(), &chat.system_prompt);
     if let Some(block) = skills::prompt_block(&skills) {
         if !system.is_empty() {
             system.push_str("\n\n");
@@ -635,9 +642,9 @@ pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &s
     }
     let files = Files { root: attachments::root(&core.data_dir), caps: caps_for(&provider, model) };
     let opts = History { tools: !specs.is_empty(), reasoning: settings.send_reasoning, stamps: settings.share_date, files: Some(&files) };
-    messages.extend(history_messages(&history, opts));
+    messages.extend(history_messages(history, opts));
     if native_api {
-        attach_natives(&core, &mut messages);
+        attach_natives(core, &mut messages);
     }
 
     let mut body = json!({ "model": model });
@@ -659,33 +666,219 @@ pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &s
         body["_cache"] = json!(settings.anthropic_cache);
         body["_web"] = json!(chat.summary.web && hosted_web);
     }
+    Ok(Prepared { provider, body, messages, specs, routes, settings })
+}
+
+pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &str, model: &str) -> Result<Message, String> {
+    let core = core(app);
+    let chat = core.db.chat(chat_id)?.ok_or("That chat no longer exists")?;
+    let history = core.db.path_to(parent)?;
+    let p = prepare(&core, &chat, &history, provider_id, model)?;
+    // A new reply (sent, edited or asked again) brings an archived chat back.
+    if chat.summary.archived {
+        core.db.set_archived(chat_id, false)?;
+    }
 
     // The first exchange names the chat (unless the user named it already).
     let users: Vec<&Message> = history.iter().filter(|m| m.role == "user").collect();
-    let title = if users.len() == 1 { title_plan(&core, chat_id, &provider, model) } else { None };
+    let title = if users.len() == 1 { title_plan(&core, chat_id, &p.provider, model) } else { None };
     let first_user = users.first().map(|m| title_source(&m.content, &m.attachments)).unwrap_or_default();
 
     let assistant = core.db.add_message(chat_id, Some(parent), "assistant", "", &[], Some(provider_id), Some(model), "streaming")?;
-    let token = core.streams.start(&assistant.id, chat_id);
+    let token = core.streams.start(&assistant.id, chat_id, Vec::new());
     let job = Job {
         app: app.clone(),
-        api: provider.api.clone(),
-        base: provider.base_url,
-        key: crate::secrets::key(&provider.id),
-        body,
-        messages,
-        specs,
-        routes,
-        max_rounds: settings.tool_rounds.clamp(1, 50),
-        send_reasoning: settings.send_reasoning,
+        api: p.provider.api.clone(),
+        base: p.provider.base_url,
+        key: crate::secrets::key(&p.provider.id),
+        body: p.body,
+        messages: p.messages,
+        specs: p.specs,
+        routes: p.routes,
+        max_rounds: p.settings.tool_rounds.clamp(1, 50),
+        send_reasoning: p.settings.send_reasoning,
         title,
         first_user,
         token,
         chat_id: chat_id.to_string(),
         message_id: assistant.id.clone(),
+        resume: None,
     };
     tauri::async_runtime::spawn(job.run());
     Ok(assistant)
+}
+
+/// How a reply that didn't finish goes on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Pickup {
+    /// It stopped in the middle of its answer: the model goes on from that text.
+    Text,
+    /// It stopped between steps (after a tool, or while thinking): the next step runs.
+    Fresh,
+}
+
+/// A tool call that never finished: stopped while it waited for the user or ran.
+fn unfinished_tool(p: &Part) -> bool {
+    matches!(p, Part::Tool { status, result, .. }
+        if matches!(status.as_str(), "approval" | "running" | "denied") || (status == "error" && result.as_deref() == Some("Stopped")))
+}
+
+/// Trims a reply that didn't finish to where it can go on: tool calls that
+/// never finished go (the model can ask again), and so does thinking cut off
+/// halfway (the model thinks again).
+fn trim_for_continue(parts: &mut Vec<Part>) -> Pickup {
+    while parts.last().is_some_and(unfinished_tool) {
+        parts.pop();
+    }
+    if matches!(parts.last(), Some(Part::Reasoning { .. })) {
+        parts.pop();
+    }
+    match parts.last() {
+        Some(Part::Text { text }) if !text.trim().is_empty() => Pickup::Text,
+        _ => Pickup::Fresh,
+    }
+}
+
+/// The text of the reply's last round: what comes after its last tool call.
+fn trailing_text(parts: &[Part]) -> String {
+    let start = parts.iter().rposition(|p| matches!(p, Part::Tool { .. })).map_or(0, |i| i + 1);
+    parts[start..].iter().filter_map(|p| if let Part::Text { text } = p { Some(text.as_str()) } else { None }).collect()
+}
+
+/// The rounds of a reply that ended with tool calls (each one request):
+/// `history_messages` sends each as one assistant message.
+fn tool_rounds(parts: &[Part]) -> usize {
+    let mut rounds = 0;
+    let mut in_calls = false;
+    for p in parts {
+        let call = matches!(p, Part::Tool { server_id, .. } if server_id != crate::anthropic::HOSTED);
+        if call && !in_calls {
+            rounds += 1;
+        }
+        if call || matches!(p, Part::Reasoning { .. } | Part::Text { .. }) {
+            in_calls = call;
+        }
+    }
+    rounds
+}
+
+/// Continue: a reply that didn't finish (stopped, failed, or cut off at the
+/// length limit) goes on in the same message, with the model that wrote it.
+/// Servers that can go on from a half-written answer get one (thinking off,
+/// so templates take it); Claude, and servers that refuse it, get the answer
+/// so far plus a note asking to go on (`llm::CONTINUE_NOTE`).
+pub fn continue_reply(app: &AppHandle, chat_id: &str, message_id: &str) -> Result<(), String> {
+    let core = core(app);
+    let chat = core.db.chat(chat_id)?.ok_or("That chat no longer exists")?;
+    let reply = core.db.message(message_id)?.ok_or("That message no longer exists")?;
+    if reply.role != "assistant" || reply.chat_id != chat_id {
+        return Err("Only a reply can be continued".into());
+    }
+    if reply.status == "streaming" || core.streams.active_chats().iter().any(|c| c == chat_id) {
+        return Err("Wait for the reply in progress to finish".into());
+    }
+    let (Some(provider_id), Some(model)) = (reply.provider_id.clone(), reply.model.clone()) else {
+        return Err("That reply doesn't say which model wrote it".into());
+    };
+    let mut parts: Vec<Part> = reply.parts.clone().and_then(|p| serde_json::from_value(p).ok()).unwrap_or_default();
+    if parts.is_empty() && !reply.content.trim().is_empty() {
+        parts.push(Part::Text { text: reply.content.clone() });
+    }
+    let pickup = trim_for_continue(&mut parts);
+
+    // The conversation up to and with the reply as it now stands.
+    let mut history = core.db.path_to(message_id)?;
+    if let Some(last) = history.last_mut().filter(|m| m.id == message_id) {
+        last.parts = Some(serde_json::to_value(&parts).unwrap_or(Value::Null));
+        if parts.is_empty() {
+            last.content.clear();
+        }
+    }
+    let mut p = prepare(&core, &chat, &history, &provider_id, &model)?;
+    let mut first_body = None;
+    if pickup == Pickup::Text {
+        if p.provider.api == "anthropic" {
+            // Claude takes no half-written answer: it gets the note.
+            p.messages.push(llm::continue_note());
+        } else {
+            // The request ends with the answer so far, as it was written.
+            if let Some(last) = p.messages.last_mut().filter(|m| m["role"] == "assistant") {
+                last["content"] = json!(trailing_text(&parts).trim_start());
+                if let Some(o) = last.as_object_mut() {
+                    o.remove("reasoning_content");
+                }
+            }
+            let mut b = p.body.clone();
+            // Thinking is over by the answer; templates refuse a half-written answer with it on.
+            apply_effort(&mut b, "off");
+            b["_prefill"] = json!(true);
+            // vLLM's switches for going on from the last message.
+            b["continue_final_message"] = json!(true);
+            b["add_generation_prompt"] = json!(false);
+            first_body = Some(b);
+        }
+    }
+    if chat.summary.archived {
+        core.db.set_archived(chat_id, false)?;
+    }
+
+    // Anthropic blocks of the rounds that stay; the round that goes on is stored without.
+    let complete = tool_rounds(&parts);
+    let mut natives: Vec<Value> = core
+        .db
+        .natives(&[message_id.to_string()])?
+        .get(message_id)
+        .and_then(|n| n.get("rounds"))
+        .and_then(Value::as_array)
+        .map(|r| r.iter().take(complete).cloned().collect())
+        .unwrap_or_default();
+    natives.resize(complete, Value::Null);
+
+    core.db.restart_message(message_id, &serde_json::to_value(&parts).unwrap_or(Value::Null))?;
+    let token = core.streams.start(message_id, chat_id, parts.clone());
+    let job = Job {
+        app: app.clone(),
+        api: p.provider.api.clone(),
+        base: p.provider.base_url,
+        key: crate::secrets::key(&p.provider.id),
+        body: p.body,
+        messages: p.messages,
+        specs: p.specs,
+        routes: p.routes,
+        max_rounds: p.settings.tool_rounds.clamp(1, 50),
+        send_reasoning: p.settings.send_reasoning,
+        title: None,
+        first_user: String::new(),
+        token,
+        chat_id: chat_id.to_string(),
+        message_id: message_id.to_string(),
+        resume: Some(Resume {
+            prefill: first_body.as_ref().map(|_| trailing_text(&parts).trim_start().to_string()),
+            parts,
+            stats: reply.stats.clone(),
+            natives,
+            merged: pickup == Pickup::Text,
+            first_body,
+        }),
+    };
+    tauri::async_runtime::spawn(job.run());
+    crate::holster::publish(app);
+    Ok(())
+}
+
+/// A continued reply's stats: time and tokens of both parts added up.
+fn merge_stats(old: &Value, mut new: Value) -> Value {
+    for k in ["totalMs", "completionTokens"] {
+        let sum = old.get(k).and_then(Value::as_u64).unwrap_or(0) + new.get(k).and_then(Value::as_u64).unwrap_or(0);
+        new[k] = json!(sum);
+    }
+    if let Some(t) = old.get("ttftMs").filter(|t| t.is_u64()) {
+        new["ttftMs"] = t.clone();
+    }
+    if old.get("estimated").and_then(Value::as_bool) == Some(true) {
+        new["estimated"] = json!(true);
+    }
+    new
 }
 
 /// The ways servers take a thinking budget. All of these are optional
@@ -738,6 +931,23 @@ struct Job {
     token: CancellationToken,
     chat_id: String,
     message_id: String,
+    /// Continue: the reply goes on from what it has.
+    resume: Option<Resume>,
+}
+
+/// What a continued reply starts from.
+struct Resume {
+    parts: Vec<Part>,
+    stats: Option<Value>,
+    /// Anthropic blocks of the rounds kept.
+    natives: Vec<Value>,
+    /// The first round goes on from cut-off text: stored, they're one round,
+    /// so its blocks (which lack that text) aren't kept.
+    merged: bool,
+    /// The first request, when it ends with the half-written answer.
+    first_body: Option<Value>,
+    /// That half-written answer (the first request's last message).
+    prefill: Option<String>,
 }
 
 #[derive(Default)]
@@ -842,18 +1052,21 @@ impl Job {
         let mut have_usage = false;
         let mut finish: Option<String> = None;
         let mut outcome: Result<End, String> = Ok(End::Done);
+        let resume = self.resume.as_ref();
+        let parts = resume.map(|r| r.parts.clone()).unwrap_or_default();
+        let answered = parts.iter().any(|p| matches!(p, Part::Text { text } if !text.trim().is_empty()));
         let mut tr = Tracker {
             app: self.app.clone(),
             message_id: self.message_id.clone(),
-            parts: Vec::new(),
+            parts,
             pending: Vec::new(),
             last_emit: Instant::now(),
             thinking_since: None,
-            answered: false,
+            answered,
         };
         let mut messages = self.messages.clone();
         // Anthropic's blocks, one list per round, stored with the reply.
-        let mut natives: Vec<Value> = Vec::new();
+        let mut natives: Vec<Value> = resume.map(|r| r.natives.clone()).unwrap_or_default();
         // The last round paused (Anthropic's long server tools): the next one continues it.
         let mut paused = false;
 
@@ -869,7 +1082,10 @@ impl Job {
         }
 
         'rounds: for round in 0..=self.max_rounds {
-            let mut body = self.body.clone();
+            let mut body = match resume.and_then(|r| r.first_body.as_ref()).filter(|_| round == 0) {
+                Some(first) => first.clone(),
+                None => self.body.clone(),
+            };
             body["messages"] = json!(messages);
             // The last round must answer with words.
             if !self.specs.is_empty() && round < self.max_rounds {
@@ -969,6 +1185,7 @@ impl Job {
             if let Some(b) = &blocks {
                 match natives.last_mut().and_then(Value::as_array_mut).filter(|_| paused) {
                     Some(last) => last.extend(b.iter().cloned()),
+                    None if round == 0 && resume.is_some_and(|r| r.merged) => natives.push(Value::Null),
                     None => natives.push(json!(b)),
                 }
             }
@@ -1001,6 +1218,14 @@ impl Job {
                 .zip(&ids)
                 .map(|(c, id)| json!({ "id": id, "type": "function", "function": { "name": c.name, "arguments": c.arguments } }))
                 .collect();
+            // A first round that went on from a half-written answer: that answer and
+            // what followed are one message from here on.
+            if let Some(prefix) = resume.and_then(|r| r.prefill.as_ref()).filter(|_| round == 0) {
+                if messages.last().is_some_and(|m| m["role"] == "assistant") {
+                    messages.pop();
+                }
+                round_text = format!("{prefix}{round_text}");
+            }
             let content = if round_text.trim().is_empty() { Value::Null } else { json!(round_text) };
             let mut msg = assistant_message(content, if self.send_reasoning { &round_thought } else { "" });
             msg["tool_calls"] = json!(tool_calls);
@@ -1149,11 +1374,15 @@ impl Job {
             "finishReason": finish,
             "toolCalls": tool_count,
         });
+        let stats = match resume.and_then(|r| r.stats.as_ref()) {
+            Some(old) => merge_stats(old, stats),
+            None => stats,
+        };
         let parts_json = serde_json::to_value(&parts).unwrap_or(Value::Null);
         if let Err(e) = core.db.finish_message(&self.message_id, &content, &reasoning, &parts_json, status, error.as_deref(), &stats) {
             eprintln!("chat: couldn't store the reply: {e}");
         }
-        if !natives.is_empty() {
+        if !natives.is_empty() || resume.is_some() {
             let _ = core.db.set_native(&self.message_id, &json!({ "rounds": natives }));
         }
         if let Ok(Some(chat)) = core.db.chat(&self.chat_id) {
@@ -1466,5 +1695,71 @@ mod tests {
         let named = history_messages(&[u], History::default());
         assert_eq!(named[0]["content"], "[Attached: dot.png, note.md]\n\nSummarize");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn call(id: &str, status: &str, result: Option<&str>) -> Part {
+        Part::Tool {
+            id: id.into(),
+            server_id: "s".into(),
+            server: "fs".into(),
+            tool: "read".into(),
+            arguments: "{}".into(),
+            status: status.into(),
+            result: result.map(str::to_string),
+            ms: None,
+        }
+    }
+
+    #[test]
+    fn continue_goes_on_from_text_or_the_next_step() {
+        let text = |t: &str| Part::Text { text: t.into() };
+        let thought = |t: &str| Part::Reasoning { text: t.into(), ms: None };
+
+        // Cut off mid-answer: go on from the text.
+        let mut parts = vec![thought("hmm"), text("The answer is")];
+        assert_eq!(trim_for_continue(&mut parts), Pickup::Text);
+        assert_eq!(parts.len(), 2);
+
+        // Stopped while thinking: the half thought goes, the model thinks again.
+        let mut parts = vec![thought("half a")];
+        assert_eq!(trim_for_continue(&mut parts), Pickup::Fresh);
+        assert!(parts.is_empty());
+
+        // Stopped at a tool: unfinished calls go, finished ones stay.
+        let mut parts = vec![text("Looking"), call("a", "done", Some("ok")), call("b", "error", Some("Stopped")), call("c", "approval", None)];
+        assert_eq!(trim_for_continue(&mut parts), Pickup::Fresh);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(tool_rounds(&parts), 1);
+
+        // A tool that failed on its own is part of the reply.
+        let mut parts = vec![call("a", "error", Some("No such file"))];
+        assert_eq!(trim_for_continue(&mut parts), Pickup::Fresh);
+        assert_eq!(parts.len(), 1);
+    }
+
+    #[test]
+    fn rounds_and_trailing_text_follow_history_messages() {
+        let text = |t: &str| Part::Text { text: t.into() };
+        let parts = vec![text("a"), call("1", "done", Some("x")), call("2", "done", Some("y")), text("b"), call("3", "done", Some("z")), text("c "), text("d")];
+        assert_eq!(tool_rounds(&parts), 2);
+        assert_eq!(trailing_text(&parts), "c d");
+        assert_eq!(trailing_text(&[text("only")]), "only");
+        // history_messages sends one assistant message per tool round, then the text.
+        let m = msg("assistant", "", Some(serde_json::to_value(&parts).unwrap()));
+        let out = history_messages(&[m], History { tools: true, ..History::default() });
+        let assistants = out.iter().filter(|m| m["role"] == "assistant").count();
+        assert_eq!(assistants, tool_rounds(&parts) + 1);
+    }
+
+    #[test]
+    fn continued_stats_add_up() {
+        let old = json!({ "totalMs": 1000, "completionTokens": 50, "ttftMs": 200, "estimated": false });
+        let new = json!({ "totalMs": 500, "completionTokens": 20, "ttftMs": 90, "estimated": true, "finishReason": "stop" });
+        let s = merge_stats(&old, new);
+        assert_eq!(s["totalMs"], 1500);
+        assert_eq!(s["completionTokens"], 70);
+        assert_eq!(s["ttftMs"], 200);
+        assert_eq!(s["estimated"], true);
+        assert_eq!(s["finishReason"], "stop");
     }
 }

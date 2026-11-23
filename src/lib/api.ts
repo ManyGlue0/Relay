@@ -424,6 +424,8 @@ export const api = {
     invoke<Chat>("chat_edit", { chatId, messageId, text, attachments, providerId, model }),
   regenerate: (chatId: string, messageId: string, providerId: string, model: string) =>
     invoke<Chat>("chat_regenerate", { chatId, messageId, providerId, model }),
+  /** Continue: a reply that didn't finish goes on in the same message. */
+  continueReply: (chatId: string, messageId: string) => invoke<Chat>("chat_continue", { chatId, messageId }),
   branch: (chatId: string, messageId: string) => invoke<Chat>("chat_branch", { chatId, messageId }),
   stop: (chatId: string) => invoke<void>("chat_stop", { chatId }),
   streamingChats: () => invoke<string[]>("streaming_chats"),

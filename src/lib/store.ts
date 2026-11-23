@@ -100,6 +100,8 @@ interface State {
   /** `keep`: the ids of the original's attachments that stay. */
   edit(messageId: string, text: string, keep: string[]): Promise<boolean>;
   regenerate(messageId: string, model?: ModelRef): Promise<void>;
+  /** A reply that didn't finish goes on in the same message, with its own model. */
+  continueReply(messageId: string): Promise<void>;
   branch(messageId: string): Promise<void>;
   stop(): void;
   decideTool(messageId: string, callId: string, decision: "once" | "always" | "deny"): Promise<void>;
@@ -136,6 +138,9 @@ let toastId = 0;
 let searchSeq = 0;
 /** Batches that arrived before the message they belong to. */
 const early: Record<string, StreamDelta[]> = {};
+/** Replies that ended, kept a moment: a fast reply can end before the send
+ *  that started it comes back, and the send would mark it streaming again. */
+const ended: Record<string, Message> = {};
 
 export const useStore = create<State>((set, get) => ({
   loaded: false,
@@ -322,6 +327,19 @@ export const useStore = create<State>((set, get) => ({
       const chat = await api.regenerate(st.current.id, messageId, model.providerId, model.model);
       set((s) => ({ current: chat, chats: s.chats.map((c) => (c.id === chat.id ? { ...c, archived: chat.archived } : c)), streaming: { ...s.streaming, [chat.id]: true } }));
       flushEarly(chat.leafId ?? "");
+    } catch (e) {
+      st.toast(errorText(e));
+    }
+  },
+
+  async continueReply(messageId) {
+    const st = get();
+    if (!st.current) return;
+    delete ended[messageId]; // an earlier end of this same message
+    try {
+      const chat = await api.continueReply(st.current.id, messageId);
+      set((s) => ({ current: chat, chats: s.chats.map((c) => (c.id === chat.id ? { ...c, archived: chat.archived } : c)), streaming: { ...s.streaming, [chat.id]: true } }));
+      flushEarly(messageId);
     } catch (e) {
       st.toast(errorText(e));
     }
@@ -563,6 +581,10 @@ export const useStore = create<State>((set, get) => ({
   },
 
   applyEnd(msg) {
+    ended[msg.id] = msg;
+    setTimeout(() => {
+      if (ended[msg.id] === msg) delete ended[msg.id];
+    }, 10_000);
     set((s) => {
       const streaming = { ...s.streaming };
       delete streaming[msg.chatId];
@@ -657,11 +679,14 @@ function dropFile(chatKey: string, fileKey: string) {
   });
 }
 
+/** After a send, edit, regenerate or continue comes back: the batches, and
+ *  the end, that came first. */
 function flushEarly(messageId: string) {
   const list = early[messageId];
-  if (!list) return;
   delete early[messageId];
-  for (const d of list) useStore.getState().applyDelta(d);
+  for (const d of list ?? []) useStore.getState().applyDelta(d);
+  const end = ended[messageId];
+  if (end) useStore.getState().applyEnd(end);
 }
 
 function sortChats(chats: ChatSummary[]): ChatSummary[] {

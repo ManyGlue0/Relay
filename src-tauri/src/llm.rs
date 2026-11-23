@@ -230,7 +230,8 @@ pub enum End {
 
 /// Fields Relay adds that some servers reject. A 400 or 422 gets the request
 /// again without them.
-pub const OPTIONAL_FIELDS: &[&str] = &["stream_options", "reasoning_effort", "chat_template_kwargs", "think"];
+pub const OPTIONAL_FIELDS: &[&str] =
+    &["stream_options", "reasoning_effort", "chat_template_kwargs", "think", "continue_final_message", "add_generation_prompt"];
 
 /// Endpoints (address + model) known to reject the optional fields: later
 /// requests leave them out from the start instead of failing first.
@@ -243,6 +244,45 @@ fn plain_only() -> &'static std::sync::Mutex<std::collections::HashSet<String>> 
 fn no_reasoning() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static SET: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = OnceLock::new();
     SET.get_or_init(Default::default)
+}
+
+/// Endpoints that refused a half-written answer to go on from (Continue):
+/// later ones get the note from the start.
+fn no_prefill() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static SET: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    SET.get_or_init(Default::default)
+}
+
+/// What Continue says to a model that can't be handed its half-written answer
+/// to go on from (Claude, OpenAI's API, servers that refuse one).
+pub const CONTINUE_NOTE: &str = "Your previous message was cut off. Continue it from exactly where it stopped, mid-sentence if that's where it ended. Don't repeat anything you already wrote and don't add an introduction.";
+
+/// The note, as the user message that follows the answer so far.
+pub fn continue_note() -> Value {
+    json!({ "role": "user", "content": CONTINUE_NOTE })
+}
+
+/// Servers known to answer a half-written answer with a new one instead of
+/// going on (no error to learn from).
+fn ignores_prefill(base: &str) -> bool {
+    reqwest::Url::parse(&normalize_base(base))
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|h| h == "api.openai.com")
+}
+
+/// A Continue request that ended with the half-written answer, asking with
+/// the note instead.
+fn ask_to_continue(body: &Value) -> Value {
+    let mut b = body.clone();
+    if let Some(o) = b.as_object_mut() {
+        o.remove("continue_final_message");
+        o.remove("add_generation_prompt");
+    }
+    if let Some(m) = b.get_mut("messages").and_then(Value::as_array_mut) {
+        m.push(continue_note());
+    }
+    b
 }
 
 /// Takes `reasoning_content` off every message; true if there was any.
@@ -273,6 +313,7 @@ enum Lesson {
     Nothing,
     NoReasoning,
     Plain,
+    NoPrefill,
 }
 
 pub(crate) fn is_rejection(status: reqwest::StatusCode) -> bool {
@@ -305,14 +346,25 @@ pub async fn stream_chat(
     if api == "anthropic" {
         return crate::anthropic::stream_chat(base, key, body, cancel, on).await;
     }
+    // Continue: the request ends with the half-written answer to go on from.
+    let prefill = body.get("_prefill").and_then(Value::as_bool).unwrap_or(false);
     strip_private(&mut body);
     body["stream"] = json!(true);
     body["stream_options"] = json!({ "include_usage": true });
     let memo = format!("{}|{}", normalize_base(base), body.get("model").and_then(Value::as_str).unwrap_or(""));
+    // Where the server refuses it, the same request asks with the note.
+    let mut asking = prefill.then(|| ask_to_continue(&body));
+    if prefill && (ignores_prefill(base) || no_prefill().lock().unwrap().contains(&memo)) {
+        body = asking.take().unwrap_or(body);
+    }
     if plain_only().lock().unwrap().contains(&memo) {
         strip_optional(&mut body);
+        asking.iter_mut().for_each(strip_optional);
     } else if no_reasoning().lock().unwrap().contains(&memo) {
         strip_reasoning(&mut body);
+        asking.iter_mut().for_each(|a| {
+            strip_reasoning(a);
+        });
     }
     let send = |body: &Value| request(reqwest::Method::POST, base, "/chat/completions", key).json(body).send();
 
@@ -338,6 +390,13 @@ pub async fn stream_chat(
             strip_optional(&mut plain);
             tries.push((plain, Lesson::Plain));
         }
+        // Last, a Continue asks with the note instead of the half-written answer.
+        if let Some(a) = asking.take() {
+            let mut plain = a.clone();
+            strip_optional(&mut plain);
+            tries.push((a, Lesson::NoPrefill));
+            tries.push((plain, Lesson::NoPrefill));
+        }
         let mut last = first.clone();
         let mut ok = None;
         for (attempt, lesson) in &tries {
@@ -349,6 +408,7 @@ pub async fn stream_chat(
                 match lesson {
                     Lesson::Plain => plain_only().lock().unwrap().insert(memo.clone()),
                     Lesson::NoReasoning => no_reasoning().lock().unwrap().insert(memo.clone()),
+                    Lesson::NoPrefill => no_prefill().lock().unwrap().insert(memo.clone()),
                     Lesson::Nothing => false,
                 };
                 ok = Some(r);
@@ -883,5 +943,27 @@ mod tests {
         // Stored addresses that ended in an endpoint still work.
         assert_eq!(normalize_base("http://x/v1/messages"), "http://x/v1");
         assert_eq!(normalize_base("http://x/messages"), "http://x");
+    }
+
+    #[test]
+    fn continue_falls_back_to_asking() {
+        let body = json!({
+            "model": "m",
+            "messages": [{ "role": "user", "content": "hi" }, { "role": "assistant", "content": "Hello wor" }],
+            "continue_final_message": true,
+            "add_generation_prompt": false,
+        });
+        let asked = ask_to_continue(&body);
+        assert!(asked.get("continue_final_message").is_none() && asked.get("add_generation_prompt").is_none());
+        let m = asked["messages"].as_array().unwrap();
+        assert_eq!(m.len(), 3);
+        assert_eq!(m[1]["content"], "Hello wor");
+        assert_eq!(m[2], continue_note());
+        assert!(ignores_prefill("https://api.openai.com/v1"));
+        assert!(!ignores_prefill("http://localhost:8080/v1"));
+        // The vLLM switches are dropped with the other extras on a 400.
+        for f in ["continue_final_message", "add_generation_prompt"] {
+            assert!(OPTIONAL_FIELDS.contains(&f));
+        }
     }
 }

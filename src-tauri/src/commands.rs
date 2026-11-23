@@ -409,6 +409,25 @@ pub async fn model_caps(core: CoreState<'_>, provider_id: String, model: String)
     Ok(Some(model_caps_of(&fresh, &model)))
 }
 
+/// Asks a model whether it calls tools (one small request) and remembers
+/// the answer as detected.
+#[tauri::command]
+pub async fn model_check_tools(core: CoreState<'_>, provider_id: String, model: String) -> Result<Option<ModelCaps>, String> {
+    let Some(p) = core.db.provider(&provider_id)? else { return Ok(None) };
+    let key = secrets::key(&p.id);
+    let found = llm::check_tools(&p.api, &p.base_url, key.as_deref(), &model).await;
+    let Some(mut fresh) = core.db.provider(&provider_id)? else { return Ok(None) };
+    if let Some(yes) = found {
+        let mut caps = fresh.caps.get(&model).copied().unwrap_or_else(|| llm::guess_caps(&fresh.base_url, &model));
+        caps.tools = Some(yes);
+        fresh.caps.insert(model.clone(), caps);
+        core.db.save_provider(&fresh)?;
+    } else {
+        return Err("The model didn't answer: check that its server is running".into());
+    }
+    Ok(Some(model_caps_of(&fresh, &model)))
+}
+
 /// The user's word on one ability of a model (None: go back to what was detected).
 #[tauri::command]
 pub fn model_caps_set(core: CoreState, provider_id: String, model: String, ability: String, on: Option<bool>) -> Result<ModelCaps, String> {
@@ -696,7 +715,7 @@ pub fn mcp_import(app: AppHandle, core: CoreState, text: String) -> Result<usize
 
 #[tauri::command]
 pub fn tool_decide(core: CoreState, message_id: String, call_id: String, decision: String) -> Result<(), String> {
-    if !matches!(decision.as_str(), "once" | "always" | "deny") {
+    if !matches!(decision.as_str(), "once" | "always" | "deny" | "edits") {
         return Err("Unknown decision".into());
     }
     if core.streams.decide(&message_id, &call_id, &decision) {
@@ -909,6 +928,17 @@ pub fn chat_search(core: CoreState, query: String, kind: Option<String>) -> Resu
 #[tauri::command]
 pub fn agent_folder_info(path: String) -> agent::FolderInfo {
     agent::folder_info(std::path::Path::new(&path))
+}
+
+/// Reads a session's AGENTS.md / CLAUDE.md again (they're read once when it
+/// starts); returns how long the text is (0: no file).
+#[tauri::command]
+pub fn agent_reload_instructions(core: CoreState, chat_id: String) -> Result<usize, String> {
+    let chat = core.db.chat_summary(&chat_id)?.ok_or("That session no longer exists")?;
+    let folder = chat.folder.ok_or("This session has no folder yet")?;
+    let text = agent::read_instructions(std::path::Path::new(&folder));
+    core.db.set_instructions(&chat_id, &text)?;
+    Ok(text.len())
 }
 
 /// Opens a session's folder in Explorer.

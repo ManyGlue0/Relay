@@ -298,6 +298,8 @@ pub fn run() {
             commands::chat_search,
             commands::agent_folder_info,
             commands::agent_open_folder,
+            commands::model_check_tools,
+            commands::agent_reload_instructions,
             commands::chat_markdown,
             commands::usage_stats,
             commands::holster_status,

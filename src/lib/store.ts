@@ -24,6 +24,7 @@ import {
   type Settings,
   type Skill,
   type StreamDelta,
+  type ToolDecision,
 } from "./api";
 import { prepare } from "./media";
 
@@ -107,7 +108,7 @@ interface State {
   continueReply(messageId: string): Promise<void>;
   branch(messageId: string): Promise<void>;
   stop(): void;
-  decideTool(messageId: string, callId: string, decision: "once" | "always" | "deny"): Promise<void>;
+  decideTool(messageId: string, callId: string, decision: ToolDecision): Promise<void>;
   renameChat(id: string, title: string): Promise<void>;
   pinChat(id: string, pinned: boolean): Promise<void>;
   archiveChat(id: string, archived: boolean): Promise<void>;
@@ -119,6 +120,8 @@ interface State {
   /** Opens an attachment in the app Windows uses for it. */
   openAttachment(id: string): Promise<void>;
   ensureCaps(ref: ModelRef): void;
+  /** Asks a model whether it calls tools; `quiet` (automatic checks) shows no error. */
+  checkTools(ref: ModelRef, quiet?: boolean): Promise<void>;
   setCap(ref: ModelRef, ability: Ability, on: boolean | null): Promise<void>;
   /** `deleteFolder`: an Agent session's workspace goes too. */
   deleteChat(id: string, deleteFolder?: boolean): Promise<void>;
@@ -500,6 +503,16 @@ export const useStore = create<State>((set, get) => ({
       .catch(() => {});
   },
 
+  async checkTools(ref, quiet = false) {
+    const key = `${ref.providerId}/${ref.model}`;
+    try {
+      const c = await api.checkTools(ref.providerId, ref.model);
+      if (c) set((s) => ({ caps: { ...s.caps, [key]: c } }));
+    } catch (e) {
+      if (!quiet) get().toast(errorText(e));
+    }
+  },
+
   async setCap(ref, ability, on) {
     try {
       const c = await api.setModelCap(ref.providerId, ref.model, ability, on);
@@ -551,6 +564,7 @@ export const useStore = create<State>((set, get) => ({
     if (opts.skills !== undefined) last.chatSkills = opts.skills;
     if (opts.tools !== undefined) last.chatMcp = opts.tools;
     if (opts.web !== undefined) last.chatWeb = opts.web;
+    if (opts.mode) last.agentMode = opts.mode;
     if (Object.keys(last).length) void api.updateSettings(last).then((settings) => set({ settings }));
     if (!st.current) {
       set((s) => ({ draftOptions: { ...s.draftOptions, ...opts } }));
@@ -564,6 +578,7 @@ export const useStore = create<State>((set, get) => ({
       tools: opts.tools,
       skills: opts.skills,
       web: opts.web,
+      mode: opts.mode,
     };
     set((s) => ({ current: s.current ? { ...s.current, ...opts } : null }));
     void api
@@ -774,7 +789,7 @@ export function useActiveModel(): ModelRef | null {
 /** The options the composer shows: the chat's, or the draft's. */
 /** A new chat's options: the default preset and the switches used last. */
 function draftFrom(settings: Settings, kind: ChatKind): ChatOptions {
-  return { presetId: settings.defaultPreset, tools: settings.chatMcp, skills: settings.chatSkills, web: settings.chatWeb, kind, folder: null };
+  return { presetId: settings.defaultPreset, tools: settings.chatMcp, skills: settings.chatSkills, web: settings.chatWeb, kind, folder: null, mode: settings.agentMode };
 }
 
 /** Chat or Agent. */

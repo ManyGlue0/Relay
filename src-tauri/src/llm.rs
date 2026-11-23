@@ -634,36 +634,51 @@ pub async fn detect_context(base: &str, key: Option<&str>, model: &str) -> Optio
 /// the name (`guess_caps`). None: no server said anything.
 pub async fn detect_caps(base: &str, key: Option<&str>, model: &str) -> Option<Caps> {
     let guess = guess_caps(base, model);
+    let has_in = |list: &[Value], k: &str| list.iter().any(|x| x.as_str().is_some_and(|s| s.eq_ignore_ascii_case(k)));
     let from_list = |list: &[Value]| -> Caps {
-        let has = |k: &str| list.iter().any(|x| x.as_str().is_some_and(|s| s.eq_ignore_ascii_case(k)));
+        let has = |k: &str| has_in(list, k);
         let vision = has("image") || has("vision");
-        Caps { vision, audio: has("audio"), video: has("video") || (vision && guess.video), pdf: has("file") || guess.pdf }
+        let tools = if has("tools") || has("tool_use") || has("function_calling") { Some(true) } else { guess.tools };
+        Caps { vision, audio: has("audio"), video: has("video") || (vision && guess.video), pdf: has("file") || guess.pdf, tools }
     };
     if let Some(v) = model_list(base, key).await {
         let list = v.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
         if let Some(m) = list.iter().find(|m| m.get("id").and_then(Value::as_str) == Some(model)) {
+            // OpenRouter lists the request fields each model takes.
+            let tools = m.get("supported_parameters").and_then(Value::as_array).map(|p| has_in(p, "tools"));
             if let Some(mods) = m.pointer("/architecture/input_modalities").and_then(Value::as_array) {
-                return Some(from_list(mods));
+                return Some(Caps { tools: tools.or(guess.tools), ..from_list(mods) });
             }
             if let Some(caps) = m.get("capabilities").and_then(Value::as_array) {
                 return Some(from_list(caps));
             }
-            // Anthropic's: a tree with `supported` at each leaf. Claude reads PDFs.
+            // Anthropic's: a tree with `supported` at each leaf. Claude reads PDFs and calls tools.
             if let Some(vision) = m.pointer("/capabilities/image_input/supported").and_then(Value::as_bool) {
                 let pdf = m.pointer("/capabilities/pdf_input/supported").and_then(Value::as_bool).unwrap_or(true);
-                return Some(Caps { vision, audio: false, video: false, pdf });
+                return Some(Caps { vision, audio: false, video: false, pdf, tools: Some(true) });
             }
         }
     }
     let root = root_of(base);
-    if let Some(m) = get_json(format!("{root}/props"), key).await.and_then(|v| v.get("modalities").cloned()) {
+    if let Some(props) = get_json(format!("{root}/props"), key).await.filter(|v| v.get("modalities").is_some() || v.get("chat_template").is_some()) {
+        let m = props.get("modalities").cloned().unwrap_or(Value::Null);
         let vision = m.get("vision").and_then(Value::as_bool).unwrap_or(false);
         let audio = m.get("audio").and_then(Value::as_bool).unwrap_or(false);
-        return Some(Caps { vision, audio, video: vision && guess.video, pdf: guess.pdf });
+        // llama.cpp: what its chat template handles (tools need --jinja and a template that knows them).
+        let tools = props.pointer("/chat_template_caps/supports_tools").and_then(Value::as_bool).or_else(|| {
+            props.get("chat_template").and_then(Value::as_str).filter(|t| t.contains("tool")).map(|_| true)
+        });
+        return Some(Caps { vision, audio, video: vision && guess.video, pdf: guess.pdf, tools: tools.or(guess.tools) });
     }
-    if let Some(kind) = get_json(format!("{root}/api/v0/models/{model}"), key).await.and_then(|v| v.get("type").and_then(Value::as_str).map(str::to_string)) {
-        let vision = kind == "vlm";
-        return Some(Caps { vision, audio: guess.audio, video: vision && guess.video, pdf: guess.pdf });
+    if let Some(info) = get_json(format!("{root}/api/v0/models/{model}"), key).await.filter(|v| v.get("type").is_some()) {
+        let vision = info.get("type").and_then(Value::as_str) == Some("vlm");
+        // LM Studio: `capabilities: ["tool_use"]`, or `trained_for_tool_use` before.
+        let tools = info
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .map(|c| has_in(c, "tool_use"))
+            .or_else(|| info.get("trained_for_tool_use").and_then(Value::as_bool));
+        return Some(Caps { vision, audio: guess.audio, video: vision && guess.video, pdf: guess.pdf, tools: tools.or(guess.tools) });
     }
     let mut show = client().post(format!("{root}/api/show")).timeout(Duration::from_secs(4)).json(&json!({ "model": model }));
     if let Some(k) = key.filter(|k| !k.is_empty()) {
@@ -672,7 +687,8 @@ pub async fn detect_caps(base: &str, key: Option<&str>, model: &str) -> Option<C
     if let Ok(r) = show.send().await {
         if r.status().is_success() {
             if let Some(caps) = crate::limits::json(r, crate::limits::MAX_JSON).await.ok().and_then(|v| v.get("capabilities").and_then(Value::as_array).cloned()) {
-                return Some(from_list(&caps));
+                // Ollama lists "tools" when the model's template takes them.
+                return Some(Caps { tools: Some(has_in(&caps, "tools")), ..from_list(&caps) });
             }
         }
     }
@@ -717,7 +733,47 @@ pub fn guess_caps(base: &str, model: &str) -> Caps {
     let video = any(&["gemini", "qwen2-vl", "qwen2.5-vl", "qwen3-vl", "omni", "video", "internvl", "llava-onevision", "minicpm-v"]);
     // OpenRouter reads PDFs for every model; OpenAI for its vision models.
     let pdf = host.contains("openrouter.ai") || host.contains("api.anthropic.com") || (host.contains("api.openai.com") && vision);
-    Caps { vision, audio, video, pdf }
+    // The big hosted models all call tools; for the rest, nobody knows until asked.
+    let tools = (hosted || host.contains("api.anthropic.com") || host.contains("api.openai.com")).then_some(true);
+    Caps { vision, audio, video, pdf, tools }
+}
+
+/// Whether a model calls tools, asked with one small request: a `ping` tool
+/// and "call it". A call means yes; plain text, or the server refusing the
+/// tools, means no. None: the request failed for another reason.
+pub async fn check_tools(api: &str, base: &str, key: Option<&str>, model: &str) -> Option<bool> {
+    let mut body = json!({
+        "model": model,
+        "messages": [
+            { "role": "system", "content": "You can call tools. When asked to call a tool, call it." },
+            { "role": "user", "content": "Call the ping tool now." }
+        ],
+        "tools": [{ "type": "function", "function": {
+            "name": "ping",
+            "description": "Answers pong. Call it when asked to.",
+            "parameters": { "type": "object", "properties": {} }
+        } }],
+    });
+    crate::chat::apply_effort(&mut body, "low");
+    if api == "anthropic" {
+        body["_effort"] = json!("low");
+    }
+    let cancel = CancellationToken::new();
+    let mut called = false;
+    let run = stream_chat(api, base, key, body, &cancel, |e| {
+        if matches!(e, Event::ToolCall { .. }) {
+            called = true;
+        }
+    });
+    match tokio::time::timeout(Duration::from_secs(120), run).await {
+        Ok(Ok(_)) => Some(called),
+        Ok(Err(e)) if e.to_lowercase().contains("tool") => Some(false),
+        Ok(Err(_)) => None,
+        Err(_) => {
+            cancel.cancel();
+            called.then_some(true)
+        }
+    }
 }
 
 // ---- <think> tags ------------------------------------------------------------------

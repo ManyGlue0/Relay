@@ -58,6 +58,8 @@ export interface Settings {
   chatWeb: boolean;
   /** What the window shows: chats, or Agent sessions. */
   view: ChatKind;
+  /** The mode a new Agent session starts with (the last one used). */
+  agentMode: AgentMode;
 }
 
 /** A chat, or an Agent session (a chat that works in a folder). */
@@ -87,6 +89,14 @@ export interface SkillsInfo {
 export const SKILLS_SERVER = "relay.skills";
 /** Relay's own web search tools (web.rs). */
 export const WEB_SERVER = "relay.web";
+/** Agent sessions' own tools (files, commands). */
+export const AGENT_SERVER = "relay.agent";
+
+/** The answer to a tool call waiting for approval ("edits": allow, and switch the session to Accept edits). */
+export type ToolDecision = "once" | "always" | "deny" | "edits";
+
+/** An Agent session's permission mode. */
+export type AgentMode = "ask" | "edits" | "auto" | "bypass";
 /** The server's own tools, run inside its reply (Anthropic's web search). */
 export const HOSTED_SERVER = "anthropic.hosted";
 
@@ -186,7 +196,7 @@ export interface ChatSummary {
   /** The folder is a workspace Relay made for the session. */
   folderOwned: boolean;
   /** An Agent session's permission mode; null: the default. */
-  mode: string | null;
+  mode: AgentMode | null;
 }
 
 export type AttachmentKind = "image" | "audio" | "video" | "pdf" | "document" | "text";
@@ -220,8 +230,9 @@ export interface Attachment {
   pages: number;
 }
 
-export type Ability = "vision" | "audio" | "video" | "pdf";
-export type Caps = Record<Ability, boolean>;
+export type Ability = "vision" | "audio" | "video" | "pdf" | "tools";
+/** What a model takes; `tools` is null until it's known (said by the server, or checked). */
+export type Caps = Record<Exclude<Ability, "tools">, boolean> & { tools: boolean | null };
 
 /** What a model takes: `caps` is what Relay goes by; `user`, what the user said over the detected `detected`. */
 export interface ModelCaps {
@@ -250,12 +261,34 @@ export interface MessageStats {
 
 export type MessageStatus = "done" | "streaming" | "stopped" | "error";
 
-export type ToolStatus = "approval" | "running" | "done" | "error" | "denied";
+export type ToolStatus = "approval" | "running" | "done" | "error" | "denied" | "blocked";
+
+/** One diff line: "+" | "-" | " ", its old and new line numbers, its text. */
+export type DiffRow = [string, number | null, number | null, string];
+
+export interface Diff {
+  hunks: DiffRow[][];
+  added: number;
+  removed: number;
+  truncated: boolean;
+}
+
+/** What an agent tool's card shows besides its result. */
+export interface ToolDetail {
+  path?: string;
+  diff?: Diff;
+  created?: boolean;
+  /** Why an approval is worth a second look (outside the folder, credentials). */
+  note?: string;
+  blocked?: { rule: string; why: string };
+  folder?: boolean;
+  files?: number;
+}
 
 export type Part =
   | { type: "reasoning"; text: string; ms?: number }
   | { type: "text"; text: string }
-  | { type: "tool"; id: string; serverId: string; server: string; tool: string; arguments: string; status: ToolStatus; result?: string; ms?: number };
+  | { type: "tool"; id: string; serverId: string; server: string; tool: string; arguments: string; status: ToolStatus; result?: string; ms?: number; detail?: ToolDetail };
 
 export interface Message {
   id: string;
@@ -298,7 +331,7 @@ export interface ChatOptions {
   kind?: ChatKind;
   /** Only for a new Agent session: the folder picked for it (none: a workspace). */
   folder?: string | null;
-  mode?: string | null;
+  mode?: AgentMode | null;
 }
 
 export interface SearchHit {
@@ -395,6 +428,8 @@ export const api = {
   refreshProvider: (id: string) => invoke<Provider>("provider_refresh", { id }),
   modelContext: (providerId: string, model: string) => invoke<number | null>("model_context", { providerId, model }),
   modelCaps: (providerId: string, model: string) => invoke<ModelCaps | null>("model_caps", { providerId, model }),
+  /** Asks the model whether it calls tools (one small request). */
+  checkTools: (providerId: string, model: string) => invoke<ModelCaps | null>("model_check_tools", { providerId, model }),
   /** `on` null: back to what was detected. */
   setModelCap: (providerId: string, model: string, ability: Ability, on: boolean | null) =>
     invoke<ModelCaps>("model_caps_set", { providerId, model, ability, on }),
@@ -424,7 +459,7 @@ export const api = {
   setMcpEnabled: (id: string, enabled: boolean) => invoke<void>("mcp_set_enabled", { id, enabled }),
   setToolPolicy: (id: string, tool: string | null, policy: ToolPolicy) => invoke<void>("mcp_set_policy", { id, tool, policy }),
   importMcp: (text: string) => invoke<number>("mcp_import", { text }),
-  decideTool: (messageId: string, callId: string, decision: "once" | "always" | "deny") => invoke<void>("tool_decide", { messageId, callId, decision }),
+  decideTool: (messageId: string, callId: string, decision: ToolDecision) => invoke<void>("tool_decide", { messageId, callId, decision }),
 
   skills: () => invoke<Skill[]>("skills_list"),
   skillsInfo: () => invoke<SkillsInfo>("skills_info"),
@@ -458,6 +493,8 @@ export const api = {
   search: (query: string, kind: ChatKind) => invoke<SearchHit[]>("chat_search", { query, kind }),
   folderInfo: (path: string) => invoke<FolderInfo>("agent_folder_info", { path }),
   openSessionFolder: (chatId: string) => invoke<void>("agent_open_folder", { chatId }),
+  /** Reads the folder's AGENTS.md / CLAUDE.md again; returns how long it is (0: none). */
+  reloadInstructions: (chatId: string) => invoke<number>("agent_reload_instructions", { chatId }),
   /** `days` null: all time. */
   usage: (days: number | null) => invoke<Usage>("usage_stats", { days }),
 

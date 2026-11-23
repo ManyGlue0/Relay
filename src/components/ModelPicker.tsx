@@ -3,7 +3,7 @@ import { Box, Check, ChevronDown, ChevronRight, RefreshCw, Search, Settings2 } f
 import { useEffect, useMemo, useRef, useState } from "react";
 import { EFFORTS, api, effortOf, errorText, type ModelRef, type Provider } from "../lib/api";
 import { spring } from "../lib/motion";
-import { isOffline, providerModels, shortModel, useChatOptions, useStore } from "../lib/store";
+import { isOffline, providerModels, shortModel, useChatOptions, useStore, useView } from "../lib/store";
 import { IconGlyph, iconOf } from "./ProviderIcon";
 import { MenuItem, Popover, SubmenuItem, anchorFrom, type Anchor } from "./ui";
 
@@ -37,10 +37,19 @@ export function ModelMenu({
     return !!p && !!value && isOffline(p, value.model, online);
   })();
   const [showOffline, setShowOffline] = useState(currentOffline);
+  // In Agent mode, models that can't call tools carry a badge.
+  const agent = useView() === "agent";
+  const caps = useStore((s) => s.caps);
 
   useEffect(() => {
     void useStore.getState().probeProviders();
   }, []);
+
+  useEffect(() => {
+    if (!agent) return;
+    const refs = providers.flatMap((p) => providerModels(p).map((model) => ({ providerId: p.id, model }))).slice(0, 40);
+    for (const r of refs) useStore.getState().ensureCaps(r);
+  }, [agent, providers]);
 
   const { groups, offline } = useMemo(() => {
     const f = filter.trim().toLowerCase();
@@ -156,6 +165,11 @@ export function ModelMenu({
                     <span className="model-item-name">{shortModel(m)}</span>
                     {m.includes("/") && <span className="model-item-path">{m.slice(0, m.lastIndexOf("/"))}</span>}
                   </span>
+                  {agent && caps[`${p.id}/${m}`]?.caps.tools === false && (
+                    <span className="model-badge" title="This model can't call tools, so it can't work in a folder">
+                      no tools
+                    </span>
+                  )}
                   {on && <Check size={14} className="menu-check" />}
                 </button>
               );

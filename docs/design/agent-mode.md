@@ -1,6 +1,6 @@
 # Agent mode
 
-Status: **being built** (step 1 of the build order is done). Target: Relay 0.7.0. Written 2026-11-23 from a
+Status: **being built** (steps 1 and 2 of the build order are done). Target: Relay 0.7.0. Written 2026-11-23 from a
 question-and-answer design session with Andrea and two review rounds; the first
 six open questions were answered the same day. What's still open is listed at
 the end.
@@ -427,8 +427,10 @@ Each step ends in something Andrea can test on its own.
    grouped by folder (Relay's workspaces share one "Workspaces" group), folder
    chip, workspaces, the folder and branch after the session's title. No new
    tools yet (a session is a chat with a folder).
-2. **File tools + Ask every time:** read, write, edit, delete, list, search;
-   approval cards with diffs; AGENTS.md / CLAUDE.md.
+2. **File tools + Ask every time** (built): read, write, edit, delete, list,
+   search; approval cards with diffs; AGENTS.md / CLAUDE.md; the mode chip with
+   Ask every time, Accept edits and Bypass (their file rules; commands come in
+   step 4); the `tools` ability, its check and the "no tools" badge.
 3. **Checkpoints:** taken before steps, "Restore to before this", files panel
    with history, pruning.
 4. **Shell tools:** PowerShell (+ Bash when installed, CMD as a setting), job

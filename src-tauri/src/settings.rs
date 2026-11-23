@@ -65,6 +65,8 @@ pub struct Settings {
     pub chat_web: bool,
     /// What the window shows: "chat" (chats) or "agent" (Agent sessions).
     pub view: String,
+    /// The permission mode a new Agent session starts with: the last one used.
+    pub agent_mode: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -156,6 +158,7 @@ impl Default for Settings {
             chat_mcp: true,
             chat_web: false,
             view: "chat".into(),
+            agent_mode: "ask".into(),
         }
     }
 }

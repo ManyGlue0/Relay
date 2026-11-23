@@ -132,10 +132,13 @@ pub struct Caps {
     pub video: bool,
     /// PDFs as files (the server reads the pages); else Relay sends their text.
     pub pdf: bool,
+    /// Calls tools (Agent mode needs it). None: not known yet (the server
+    /// didn't say and it wasn't checked).
+    pub tools: Option<bool>,
 }
 
 impl Caps {
-    pub const ABILITIES: [&'static str; 4] = ["vision", "audio", "video", "pdf"];
+    pub const ABILITIES: [&'static str; 5] = ["vision", "audio", "video", "pdf", "tools"];
 
     pub fn set(&mut self, ability: &str, on: bool) {
         match ability {
@@ -143,6 +146,7 @@ impl Caps {
             "audio" => self.audio = on,
             "video" => self.video = on,
             "pdf" => self.pdf = on,
+            "tools" => self.tools = Some(on),
             _ => {}
         }
     }
@@ -883,6 +887,16 @@ impl Db {
             // folder never changes (its checkpoints and history are about it).
             Ok(())
         })
+    }
+
+    /// The instructions read from an Agent session's folder when it started
+    /// (None: not read yet).
+    pub fn instructions(&self, id: &str) -> Result<Option<String>, String> {
+        self.with(|c| c.query_row("SELECT instructions FROM chats WHERE id = ?1", [id], |r| r.get(0)).optional()).map(Option::flatten)
+    }
+
+    pub fn set_instructions(&self, id: &str, text: &str) -> Result<(), String> {
+        self.with(|c| c.execute("UPDATE chats SET instructions = ?2 WHERE id = ?1", params![id, text]).map(|_| ()))
     }
 
     /// An Agent session's folder, set once: the workspace Relay made for it.

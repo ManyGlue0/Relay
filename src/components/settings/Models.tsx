@@ -1,4 +1,4 @@
-import { AudioLines, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, Eye, EyeOff, FileText, Film, Image, KeyRound, Loader, Plug, Plus, Search, Trash2, X, type LucideIcon } from "lucide-react";
+import { AudioLines, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, Eye, EyeOff, FileText, Film, Image, KeyRound, Loader, Plug, Plus, RefreshCw, Search, Trash2, Wrench, X, type LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, EFFORTS, effortOf, errorText, type Ability, type Provider, type ProviderApi } from "../../lib/api";
 import { compact, providerModels, shortModel, useStore } from "../../lib/store";
@@ -496,6 +496,7 @@ const ABILITIES: { key: Ability; label: string; icon: LucideIcon; what: string }
   { key: "audio", label: "Audio", icon: AudioLines, what: "hears audio" },
   { key: "video", label: "Video", icon: Film, what: "watches video (else it gets stills)" },
   { key: "pdf", label: "PDFs", icon: FileText, what: "reads PDFs as files (else it gets their text)" },
+  { key: "tools", label: "Tools", icon: Wrench, what: "calls tools (Agent mode needs it)" },
 ];
 /** Rows shown before the list needs a search. */
 const ABILITY_ROWS = 12;
@@ -533,19 +534,22 @@ function AbilityRow({ providerId, model }: { providerId: string; model: string }
     <Row label={<span className="mono-label">{shortModel(model)}</span>} hint={changed ? "Changed by you" : undefined}>
       <div className="abilities">
         {ABILITIES.map(({ key, label, icon: Icon, what }) => {
-          const on = c?.caps[key] ?? false;
+          // Tool calling nobody checked yet counts as on (most models do), drawn as unsure.
+          const unknown = key === "tools" && c?.caps.tools == null;
+          const on = (key === "tools" ? c?.caps.tools !== false : c?.caps[key]) ?? false;
+          const detected = key === "tools" ? c?.detected.tools !== false : c?.detected[key];
           const mine = c?.user[key] !== undefined;
           return (
             <button
               key={key}
-              className={`ability ${on ? "on" : ""} ${mine ? "mine" : ""}`}
+              className={`ability ${on ? "on" : ""} ${mine ? "mine" : ""} ${unknown ? "unsure" : ""}`}
               aria-pressed={on}
               disabled={!c}
-              title={`${on ? "It" : "Not detected: it"} ${what}${mine ? " (you set this)" : ""}`}
+              title={unknown ? `Not checked yet: use Check to ask the model whether it ${what.split(" (")[0]}` : `${on ? "It" : "Not detected: it"} ${what}${mine ? " (you set this)" : ""}`}
               onClick={() => {
                 if (!c) return;
                 // Back to what was detected, or the user's word against it.
-                void useStore.getState().setCap({ providerId, model }, key, !on === c.detected[key] ? null : !on);
+                void useStore.getState().setCap({ providerId, model }, key, !on === detected ? null : !on);
               }}
             >
               <Icon size={13} />
@@ -553,8 +557,29 @@ function AbilityRow({ providerId, model }: { providerId: string; model: string }
             </button>
           );
         })}
+        <CheckTools providerId={providerId} model={model} />
       </div>
     </Row>
+  );
+}
+
+/** Asks the model whether it calls tools (one small request). */
+function CheckTools({ providerId, model }: { providerId: string; model: string }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <button
+      className="ability check"
+      disabled={busy}
+      title="Ask the model whether it calls tools (one small request)"
+      onClick={async () => {
+        setBusy(true);
+        await useStore.getState().checkTools({ providerId, model });
+        setBusy(false);
+      }}
+    >
+      {busy ? <Loader size={13} className="spin" /> : <RefreshCw size={13} />}
+      Check
+    </button>
   );
 }
 

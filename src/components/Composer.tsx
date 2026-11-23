@@ -1,12 +1,12 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { AnimatePresence, motion } from "framer-motion";
-import { BookMarked, FolderClosed, FolderOpen, Globe, Mic, Paperclip, Plug, Plus, SlidersHorizontal, Square, X } from "lucide-react";
+import { BookMarked, ChevronDown, CircleAlert, FilePen, FolderClosed, FolderOpen, Globe, Hand, Mic, Paperclip, Plug, Plus, RefreshCw, ShieldOff, SlidersHorizontal, Square, X, type LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api, errorText } from "../lib/api";
+import { api, errorText, type AgentMode } from "../lib/api";
 import { folderName, useFolderInfo } from "../lib/folder";
 import { clock, micError, record, type Recording } from "../lib/media";
 import { spring } from "../lib/motion";
-import { compact, draftKeyOf, useActiveModel, useChatOptions, useEscape, useStore, viewOf, type DraftFile } from "../lib/store";
+import { compact, draftKeyOf, shortModel, useActiveModel, useChatOptions, useEscape, useStore, viewOf, type DraftFile } from "../lib/store";
 import { AttachmentTray } from "./Attachments";
 import { ModelEffortPicker } from "./ModelPicker";
 import { MenuItem, MenuSeparator, Popover, SubmenuItem, SwitchItem, anchorFrom, type Anchor } from "./ui";
@@ -93,6 +93,12 @@ export function Composer({ chatId, streaming }: { chatId: string | null; streami
           void useStore.getState().attach({ files: pasted });
         }}
         onKeyDown={(e) => {
+          // Shift+Tab: the next permission mode.
+          if (agent && e.key === "Tab" && e.shiftKey && !e.ctrlKey && !e.altKey) {
+            e.preventDefault();
+            cycleMode();
+            return;
+          }
           if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
           if (wantsSend(e, sendKey)) {
             e.preventDefault();
@@ -100,10 +106,12 @@ export function Composer({ chatId, streaming }: { chatId: string | null; streami
           }
         }}
       />
+      {agent && <NoToolsNote />}
       <div className="composer-bar">
         <PlusMenu />
         {agent && <FolderChip />}
         <div className="composer-fill" />
+        {agent && <ModeChip />}
         <ModelEffortPicker value={model} />
         <ContextMeter />
         {!!navigator.mediaDevices && <MicButton recording={recording} onStart={() => setRecording(true)} />}
@@ -425,6 +433,106 @@ function FolderChip() {
           >
             Open in Explorer
           </MenuItem>
+          <MenuItem
+            icon={<RefreshCw size={15} />}
+            disabled={missing}
+            onSelect={() => {
+              close();
+              void api
+                .reloadInstructions(current.id)
+                .then((n) => useStore.getState().toast(n ? "Instructions read again: the next message uses them" : "No AGENTS.md or CLAUDE.md in this folder"))
+                .catch((e) => useStore.getState().toast(errorText(e)));
+            }}
+          >
+            Reload instructions
+          </MenuItem>
+        </div>
+      </Popover>
+    </>
+  );
+}
+
+/** Models whose tool calling nobody knows yet are asked once, quietly. */
+const toolsAsked = new Set<string>();
+
+/** In an Agent session: a model that can't call tools can't work in the folder. */
+function NoToolsNote() {
+  const model = useActiveModel();
+  const key = model ? `${model.providerId}/${model.model}` : "";
+  const c = useStore((s) => (key ? s.caps[key] : undefined));
+  useEffect(() => {
+    if (!model) return;
+    useStore.getState().ensureCaps(model);
+    if (c && c.caps.tools == null && !toolsAsked.has(key)) {
+      toolsAsked.add(key);
+      void useStore.getState().checkTools(model, true);
+    }
+  }, [model, key, c]);
+  if (c?.caps.tools !== false) return null;
+  return (
+    <div className="composer-note">
+      <CircleAlert size={13} />
+      <span>{shortModel(model!.model)} can't call tools, so it can't read or change files here. Pick another model.</span>
+    </div>
+  );
+}
+
+/** The permission modes the chip offers, in Shift+Tab order. */
+const MODES: { value: AgentMode; label: string; icon: LucideIcon; hint: string }[] = [
+  { value: "ask", label: "Ask every time", icon: Hand, hint: "Every change and command waits for your OK" },
+  { value: "edits", label: "Accept edits", icon: FilePen, hint: "File changes in the folder run; commands still ask" },
+  { value: "bypass", label: "Bypass", icon: ShieldOff, hint: "Everything runs without asking, except reading credentials" },
+];
+
+function useMode(): AgentMode {
+  return useStore((s) => (s.current ? s.current.mode : s.draftOptions.mode) ?? s.settings?.agentMode ?? "ask");
+}
+
+function cycleMode() {
+  const st = useStore.getState();
+  const now = (st.current ? st.current.mode : st.draftOptions.mode) ?? st.settings?.agentMode ?? "ask";
+  const i = MODES.findIndex((m) => m.value === now);
+  st.setOptions({ mode: MODES[(i + 1) % MODES.length].value });
+}
+
+/** An Agent session's permission mode, beside the model chip (Shift+Tab cycles). */
+function ModeChip() {
+  const mode = useMode();
+  const [anchor, setAnchor] = useState<Anchor | null>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  const close = () => setAnchor(null);
+  const cur = MODES.find((m) => m.value === mode) ?? MODES[0];
+  const Icon = cur.icon;
+  return (
+    <>
+      <button
+        ref={btn}
+        className={`chip mode-chip mode-${mode} ${anchor ? "open" : ""}`}
+        title={`${cur.hint} (Shift+Tab to change)`}
+        onClick={() => (anchor ? close() : setAnchor(anchorFrom(btn.current!, { above: true, alignRight: true })))}
+      >
+        <Icon size={14} className="chip-icon" />
+        <span className="chip-label">{cur.label}</span>
+        <ChevronDown size={13} className="chip-caret" />
+      </button>
+      <Popover anchor={anchor} onClose={close} width={300} trigger={btn}>
+        <div className="menu">
+          {MODES.map((m) => (
+            <MenuItem
+              key={m.value}
+              icon={<m.icon size={15} />}
+              checked={m.value === mode}
+              onSelect={() => {
+                close();
+                useStore.getState().setOptions({ mode: m.value });
+              }}
+            >
+              <span className="menu-two">
+                <span>{m.label}</span>
+                <span className="menu-sub">{m.hint}</span>
+              </span>
+            </MenuItem>
+          ))}
         </div>
       </Popover>
     </>

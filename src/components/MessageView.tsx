@@ -22,10 +22,11 @@ import {
   Wrench,
 } from "lucide-react";
 import { memo, useEffect, useRef, useState } from "react";
-import { HOSTED_SERVER, partsOf, SKILLS_SERVER, WEB_SERVER, type Message, type Part } from "../lib/api";
+import { AGENT_SERVER, HOSTED_SERVER, partsOf, SKILLS_SERVER, WEB_SERVER, type Message, type Part } from "../lib/api";
 import { spring } from "../lib/motion";
 import { shortModel, useActiveModel, useStore } from "../lib/store";
 import { fullTime, seconds, sentAgo, useNow } from "../lib/time";
+import { AgentToolCard } from "./AgentCards";
 import { MessageFiles } from "./Attachments";
 import { wantsSend } from "./Composer";
 import { Markdown } from "./Markdown";
@@ -329,6 +330,11 @@ function toolFace(part: ToolPart): { icon: React.ReactNode; name: string; server
 }
 
 function ToolCard({ part, messageId }: { part: ToolPart; messageId: string }) {
+  if (part.serverId === AGENT_SERVER) return <AgentToolCard part={part} messageId={messageId} />;
+  return <OtherToolCard part={part} messageId={messageId} />;
+}
+
+function OtherToolCard({ part, messageId }: { part: ToolPart; messageId: string }) {
   const [open, setOpen] = useState(false);
   const st = TOOL_STATUS[part.status] ?? TOOL_STATUS.running;
   const asking = part.status === "approval";

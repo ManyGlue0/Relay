@@ -1209,6 +1209,143 @@ body.resizing .titlebar-title {
   max-height: 140px;
 }
 
+/* ---- Agent tool cards ------------------------------------------------------ */
+
+.tool-verb {
+  flex: none;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.agent-card .tool-name {
+  min-width: 0;
+}
+.diff-stat {
+  flex: none;
+  display: inline-flex;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.diff-stat .add {
+  color: var(--ok);
+}
+.diff-stat .del {
+  color: var(--danger);
+}
+.tool-card.blocked {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+  background: color-mix(in srgb, var(--warn) 7%, var(--surface));
+}
+.tool-card.blocked .tool-status,
+.tool-card.blocked .tool-well {
+  color: var(--warn);
+}
+.tool-card.blocked .tool-well {
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+}
+.blocked-why {
+  padding: 0 12px 10px 40px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.blocked-why strong {
+  font-weight: 600;
+  color: var(--text);
+}
+.tool-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: 12.5px;
+  color: var(--warn);
+}
+.tool-note svg {
+  flex: none;
+}
+
+.diff {
+  margin: 0 10px 10px;
+  border-radius: 9px;
+  background: var(--code-bg);
+  overflow: hidden;
+}
+.diff-scroll {
+  max-height: 420px;
+  overflow: auto;
+  padding: 4px 0;
+}
+.diff-row {
+  display: grid;
+  grid-template-columns: 34px 34px 16px 1fr;
+  min-width: max-content;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  user-select: text;
+}
+.diff-row.add {
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+.diff-row.del {
+  background: color-mix(in srgb, var(--danger) 13%, transparent);
+}
+.diff-no {
+  padding-right: 6px;
+  text-align: right;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+.diff-sign {
+  text-align: center;
+  color: var(--text-3);
+  user-select: none;
+}
+.diff-row.add .diff-sign {
+  color: var(--ok);
+}
+.diff-row.del .diff-sign {
+  color: var(--danger);
+}
+.diff-text {
+  padding-right: 12px;
+  white-space: pre;
+}
+.diff-gap {
+  padding: 2px 0 2px 74px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.diff-more {
+  display: block;
+  width: 100%;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-2);
+}
+.diff-more:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.diff-cut {
+  padding: 4px 12px 8px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+/* An Agent session's permission mode. */
+.mode-chip {
+  gap: 5px;
+}
+.mode-chip.mode-bypass,
+.mode-chip.mode-bypass:hover {
+  color: var(--warn);
+}
+
 /* ---- Markdown ----------------------------------------------------------- */
 
 .md {
@@ -3661,6 +3798,35 @@ body.resizing .titlebar-title {
 .ability.mine {
   border-style: dashed;
   border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+.ability.unsure,
+.ability.unsure:hover:not(:disabled) {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.ability.check {
+  color: var(--text-3);
+}
+/* A model that can't call tools, in Agent's model picker. */
+.model-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 13%, transparent);
+}
+/* Above the composer's bar: why this won't work as hoped. */
+.composer-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px 4px;
+  font-size: 12.5px;
+  color: var(--warn);
+}
+.composer-note svg {
+  flex: none;
 }
 .ability:disabled {
   opacity: 0.5;

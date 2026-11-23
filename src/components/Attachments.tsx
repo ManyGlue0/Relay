@@ -43,6 +43,7 @@ const ABILITY_WORDS: Record<Ability, { may: string; can: string }> = {
   audio: { may: "may not hear audio", can: "It can hear audio" },
   video: { may: "may not watch video", can: "It can watch video" },
   pdf: { may: "may not read PDFs", can: "It reads PDFs as files" },
+  tools: { may: "may not call tools", can: "It can call tools" },
 };
 
 /** The ability a file needs that the model doesn't seem to have (null: fine, or unknown). */

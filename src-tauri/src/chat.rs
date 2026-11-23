@@ -51,6 +51,9 @@ pub enum Part {
         result: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ms: Option<u64>,
+        /// What the card shows besides the result (an agent tool's diff, a count).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<Value>,
     },
 }
 
@@ -537,9 +540,23 @@ struct ToolRoute {
 /// skills), then every tool of the ready MCP servers that isn't off.
 /// The tools a chat offers, in a fixed order (skills, Relay's web tools, then
 /// MCP servers in their Settings order): each switch adds its own.
-fn tool_specs(core: &Core, skills: &[Skill], web: bool, mcp: bool) -> (Vec<Value>, HashMap<String, ToolRoute>) {
+fn tool_specs(core: &Core, agent: bool, skills: &[Skill], web: bool, mcp: bool) -> (Vec<Value>, HashMap<String, ToolRoute>) {
     let mut specs = Vec::new();
     let mut routes = HashMap::new();
+    if agent {
+        for (tool, description, schema) in crate::agent::tool_specs() {
+            let alias = crate::mcp::tool_alias(crate::agent::SERVER, tool);
+            specs.push(json!({
+                "type": "function",
+                "function": { "name": alias, "description": description, "parameters": schema }
+            }));
+            // Decided per call, by the session's mode.
+            routes.insert(
+                alias,
+                ToolRoute { server_id: crate::agent::SERVER_ID.into(), server: crate::agent::SERVER.into(), tool: tool.into(), policy: "agent".into() },
+            );
+        }
+    }
     if !skills.is_empty() {
         for (tool, schema) in skills::tool_specs(skills) {
             let alias = crate::mcp::tool_alias(skills::SERVER, &tool);
@@ -606,6 +623,21 @@ struct Prepared {
     specs: Vec<Value>,
     routes: HashMap<String, ToolRoute>,
     settings: crate::settings::Settings,
+    /// An Agent session's folder and rules.
+    agent: Option<crate::agent::Ctx>,
+}
+
+/// Tool rounds one reply may take in an Agent session (a chat's come from Settings).
+const AGENT_ROUNDS: u32 = 200;
+
+impl Prepared {
+    fn max_rounds(&self) -> u32 {
+        if self.agent.is_some() {
+            AGENT_ROUNDS
+        } else {
+            self.settings.tool_rounds.clamp(1, 50)
+        }
+    }
 }
 
 /// Builds the request for a reply to `history` (which ends with the message
@@ -627,10 +659,30 @@ fn prepare(core: &Core, chat: &crate::db::Chat, history: &[Message], provider_id
     // (`_web` below). Servers that copy the Messages API don't have those, so
     // their models get Relay's web tools, like every other model.
     let hosted_web = native_api && crate::anthropic::is_first_party(&provider.base_url);
-    let (specs, routes) = tool_specs(core, &skills, chat.summary.web && !hosted_web, chat.summary.tools);
+    let agent = if chat.summary.kind == "agent" {
+        let folder = chat.summary.folder.as_deref().ok_or("This session has no folder yet")?;
+        Some(crate::agent::Ctx::new(core, &chat.summary.id, folder))
+    } else {
+        None
+    };
+    let (specs, routes) = tool_specs(core, agent.is_some(), &skills, chat.summary.web && !hosted_web, chat.summary.tools);
 
     let mut messages: Vec<Value> = Vec::new();
     let mut system = system_prompt(core, preset.as_ref(), &chat.system_prompt);
+    if let Some(ctx) = &agent {
+        // The folder's instructions are read once, when the session starts, and
+        // kept: the request's start stays the same (the prompt cache).
+        let instructions = match core.db.instructions(&chat.summary.id)? {
+            Some(text) => text,
+            None => {
+                let text = crate::agent::read_instructions(&ctx.folder);
+                core.db.set_instructions(&chat.summary.id, &text)?;
+                text
+            }
+        };
+        let block = crate::agent::prompt(&ctx.folder.to_string_lossy(), ctx.mode(core), Some(&instructions));
+        system = if system.is_empty() { block } else { format!("{block}\n\n{system}") };
+    }
     if let Some(block) = skills::prompt_block(&skills) {
         if !system.is_empty() {
             system.push_str("\n\n");
@@ -666,7 +718,7 @@ fn prepare(core: &Core, chat: &crate::db::Chat, history: &[Message], provider_id
         body["_cache"] = json!(settings.anthropic_cache);
         body["_web"] = json!(chat.summary.web && hosted_web);
     }
-    Ok(Prepared { provider, body, messages, specs, routes, settings })
+    Ok(Prepared { provider, body, messages, specs, routes, settings, agent })
 }
 
 pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &str, model: &str) -> Result<Message, String> {
@@ -686,6 +738,7 @@ pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &s
 
     let assistant = core.db.add_message(chat_id, Some(parent), "assistant", "", &[], Some(provider_id), Some(model), "streaming")?;
     let token = core.streams.start(&assistant.id, chat_id, Vec::new());
+    let max_rounds = p.max_rounds();
     let job = Job {
         app: app.clone(),
         api: p.provider.api.clone(),
@@ -695,8 +748,9 @@ pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &s
         messages: p.messages,
         specs: p.specs,
         routes: p.routes,
-        max_rounds: p.settings.tool_rounds.clamp(1, 50),
+        max_rounds,
         send_reasoning: p.settings.send_reasoning,
+        agent: p.agent.clone(),
         title,
         first_user,
         token,
@@ -836,6 +890,7 @@ pub fn continue_reply(app: &AppHandle, chat_id: &str, message_id: &str) -> Resul
 
     core.db.restart_message(message_id, &serde_json::to_value(&parts).unwrap_or(Value::Null))?;
     let token = core.streams.start(message_id, chat_id, parts.clone());
+    let max_rounds = p.max_rounds();
     let job = Job {
         app: app.clone(),
         api: p.provider.api.clone(),
@@ -845,8 +900,9 @@ pub fn continue_reply(app: &AppHandle, chat_id: &str, message_id: &str) -> Resul
         messages: p.messages,
         specs: p.specs,
         routes: p.routes,
-        max_rounds: p.settings.tool_rounds.clamp(1, 50),
+        max_rounds,
         send_reasoning: p.settings.send_reasoning,
+        agent: p.agent.clone(),
         title: None,
         first_user: String::new(),
         token,
@@ -933,6 +989,8 @@ struct Job {
     message_id: String,
     /// Continue: the reply goes on from what it has.
     resume: Option<Resume>,
+    /// An Agent session's folder and rules.
+    agent: Option<crate::agent::Ctx>,
 }
 
 /// What a continued reply starts from.
@@ -1033,6 +1091,19 @@ impl Tracker {
     }
 }
 
+fn set_detail(part: &mut Part, value: Option<Value>) {
+    if let Part::Tool { detail, .. } = part {
+        *detail = value;
+    }
+}
+
+fn part_id(part: &Part) -> &str {
+    match part {
+        Part::Tool { id, .. } => id,
+        _ => "",
+    }
+}
+
 fn set_tool_state(part: &mut Part, status: &str, result: Option<String>, ms: Option<u64>) {
     if let Part::Tool { status: s, result: r, ms: m, .. } = part {
         *s = status.into();
@@ -1042,6 +1113,83 @@ fn set_tool_state(part: &mut Part, status: &str, result: Option<String>, ms: Opt
 }
 
 impl Job {
+    /// An agent tool call: judged by the session's mode, asked, refused or
+    /// run. Returns what goes back to the model, or None when the reply was
+    /// stopped meanwhile.
+    async fn run_agent_tool(&self, core: &Core, tr: &mut Tracker, part: &mut Part, tool: &str, args: &Value) -> Option<String> {
+        let Some(ctx) = self.agent.as_ref() else {
+            set_tool_state(part, "error", Some("Agent tools only work in Agent sessions.".into()), None);
+            tr.set_tool(part.clone());
+            return Some("Agent tools only work in Agent sessions.".into());
+        };
+        let mode = ctx.mode(core);
+        match crate::agent::judge(ctx, mode, tool, args) {
+            crate::agent::Verdict::Refuse(r) => {
+                let text = r.text(mode);
+                set_detail(part, Some(json!({ "blocked": { "rule": r.rule, "why": r.why } })));
+                set_tool_state(part, "blocked", Some(text.clone()), None);
+                tr.set_tool(part.clone());
+                return Some(text);
+            }
+            crate::agent::Verdict::Ask(note) => {
+                let mut detail = crate::agent::preview(ctx, tool, args).unwrap_or_else(|| json!({}));
+                if let Some(n) = note {
+                    detail["note"] = json!(n);
+                }
+                set_detail(part, Some(detail));
+                set_tool_state(part, "approval", None, None);
+                tr.set_tool(part.clone());
+                let decision = match core.streams.wait_for(&self.message_id, part_id(part)) {
+                    Some(rx) => tokio::select! {
+                        d = rx => d.unwrap_or_else(|_| "deny".into()),
+                        _ = self.token.cancelled() => "cancel".into(),
+                    },
+                    None => "deny".into(),
+                };
+                match decision.as_str() {
+                    "cancel" => {
+                        set_tool_state(part, "denied", None, None);
+                        tr.set_tool(part.clone());
+                        return None;
+                    }
+                    "edits" => {
+                        // "Accept edits from now": the session's mode changes.
+                        let _ = core.db.set_chat_options(&ctx.chat_id, &crate::db::ChatOptions { mode: Some("edits".into()), ..Default::default() });
+                        if let Ok(Some(c)) = core.db.chat_summary(&ctx.chat_id) {
+                            let _ = self.app.emit("chat-updated", &c);
+                        }
+                    }
+                    "once" | "always" => {}
+                    _ => {
+                        set_tool_state(part, "denied", None, None);
+                        tr.set_tool(part.clone());
+                        return Some("The user declined this tool call.".into());
+                    }
+                }
+            }
+            crate::agent::Verdict::Run => {}
+        }
+        set_tool_state(part, "running", None, None);
+        tr.set_tool(part.clone());
+        let t0 = Instant::now();
+        let res = tokio::select! {
+            r = crate::agent::call(ctx, tool, args) => Some(r),
+            _ = self.token.cancelled() => None,
+        };
+        let ms = Some(t0.elapsed().as_millis() as u64);
+        let Some(out) = res else {
+            set_tool_state(part, "error", Some("Stopped".into()), ms);
+            tr.set_tool(part.clone());
+            return None;
+        };
+        if out.detail.is_some() {
+            set_detail(part, out.detail);
+        }
+        set_tool_state(part, if out.error { "error" } else { "done" }, Some(out.text.clone()), ms);
+        tr.set_tool(part.clone());
+        Some(out.text)
+    }
+
     async fn run(self) {
         let core = core(&self.app);
         let mut started = Instant::now();
@@ -1145,6 +1293,7 @@ impl Job {
                             status: "running".into(),
                             result: None,
                             ms: None,
+                            detail: None,
                         });
                         if let Part::Tool { tool, arguments, status, result: res, .. } = part {
                             if !name.is_empty() {
@@ -1251,6 +1400,7 @@ impl Job {
                     status: "running".into(),
                     result: None,
                     ms: None,
+                    detail: None,
                 };
                 let Some(route) = route else {
                     let msg = format!("There's no tool called {}.", c.name);
@@ -1260,6 +1410,18 @@ impl Job {
                     continue;
                 };
                 let args: Value = serde_json::from_str(&arguments).unwrap_or_else(|_| json!({}));
+                if route.server_id == crate::agent::SERVER_ID {
+                    match self.run_agent_tool(&core, &mut tr, &mut part, &route.tool, &args).await {
+                        Some(answer) => {
+                            messages.push(json!({ "role": "tool", "tool_call_id": id, "content": answer }));
+                            continue;
+                        }
+                        None => {
+                            outcome = Ok(End::Cancelled);
+                            break 'rounds;
+                        }
+                    }
+                }
                 let builtin = route.server_id == skills::SERVER_ID;
                 let script_skill = args.get("skill").and_then(Value::as_str).unwrap_or("").to_string();
                 let allowed = match route.policy.as_str() {
@@ -1533,6 +1695,7 @@ mod tests {
             status: status.into(),
             result: None,
             ms: None,
+            detail: None,
         };
         apply(&mut parts, &Op::Tool { part: tool("approval") });
         apply(&mut parts, &Op::Tool { part: tool("done") });
@@ -1712,6 +1875,7 @@ mod tests {
             status: status.into(),
             result: result.map(str::to_string),
             ms: None,
+            detail: None,
         }
     }
 

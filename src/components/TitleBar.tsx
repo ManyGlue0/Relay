@@ -1,13 +1,13 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AnimatePresence, motion } from "framer-motion";
-import { Activity, Bot, Copy as RestoreIcon, FileStack, FolderClosed, GitBranch, MessageCircle, Minus, PanelLeft, Square, X } from "lucide-react";
+import { Activity, Ban, Bot, Copy as RestoreIcon, FileStack, FolderClosed, GitBranch, MessageCircle, Minus, PanelLeft, Play, Square, Trash2, X } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
-import { api, type ChatKind, type ProcessView } from "../lib/api";
+import { api, errorText, type BlockedStep, type ChatKind, type ProcessView } from "../lib/api";
 import { folderName, useFolderInfo } from "../lib/folder";
 import { spring } from "../lib/motion";
 import { useStore, useView } from "../lib/store";
 import { SECTIONS } from "./Sidebar";
-import { IconButton, MenuItem, Pill, Popover, anchorFrom, type Anchor } from "./ui";
+import { IconButton, MenuItem, MenuSeparator, Pill, Popover, anchorFrom, type Anchor } from "./ui";
 
 /** The collapsed sidebar's width: its icons sit on the same column as the open sidebar's. */
 export const RAIL = 54;
@@ -40,6 +40,7 @@ export function TitleBar({ sidebarWidth }: { sidebarWidth: number }) {
         <span data-tauri-drag-region>{title}</span>
         {!settingsOpen && <SessionMeta />}
       </div>
+      {!settingsOpen && <BlockedChip />}
       {!settingsOpen && <ProcessesChip />}
       {!settingsOpen && <FilesToggle />}
       <div className="caption">
@@ -123,6 +124,85 @@ function ProcessesChip() {
               </span>
             </MenuItem>
           ))}
+        </div>
+      </Popover>
+    </>
+  );
+}
+
+/** What a blocked step was, in a few words. */
+function stepText(b: BlockedStep): string {
+  const a = b.args as Record<string, string | undefined>;
+  if (a.command) return a.command;
+  const verb: Record<string, string> = { write_file: "Write", edit_file: "Edit", delete_path: "Delete", read_file: "Read", list: "List", search: "Search" };
+  return `${verb[b.tool] ?? b.tool} ${a.path ?? a.pattern ?? ""}`.trim();
+}
+
+/** Auto's blocked list: "Blocked: n", each step with "Run it now". */
+function BlockedChip() {
+  const chatId = useStore((s) => (s.current && s.current.id === s.currentId && s.current.kind === "agent" ? s.current.id : null));
+  const seq = useStore((s) => s.blockedSeq);
+  const [list, setList] = useState<BlockedStep[]>([]);
+  const [running, setRunning] = useState<number | null>(null);
+  const [anchor, setAnchor] = useState<Anchor | null>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!chatId) return setList([]);
+    let live = true;
+    void api.blocked(chatId).then((l) => live && setList(l)).catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [chatId, seq]);
+  const waiting = list.filter((b) => !b.ran);
+  if (!chatId || list.length === 0) return null;
+  const run = (b: BlockedStep) => {
+    setRunning(b.at);
+    void api
+      .runBlocked(chatId, b.at)
+      .then((done) => {
+        useStore.getState().toast(done.error ? `It ran, with an error: ${(done.result ?? "").slice(0, 160)}` : "It ran. Tell the model, if it should know.");
+        void useStore.getState().refreshCheckpoints(chatId);
+      })
+      .catch((e) => useStore.getState().toast(errorText(e)))
+      .finally(() => setRunning(null));
+  };
+  return (
+    <>
+      <button
+        ref={btn}
+        className={`chip proc-chip blocked-chip ${waiting.length ? "has" : ""} ${anchor ? "open" : ""}`}
+        title="Steps Auto refused"
+        onClick={() => (anchor ? setAnchor(null) : setAnchor(anchorFrom(btn.current!, { alignRight: true })))}
+      >
+        <Ban size={14} className="chip-icon" />
+        <span className="chip-label">Blocked: {waiting.length}</span>
+      </button>
+      <Popover anchor={anchor} onClose={() => setAnchor(null)} width={380} trigger={btn}>
+        <div className="menu blocked-menu">
+          {list
+            .slice()
+            .reverse()
+            .map((b) => (
+              <MenuItem key={b.at} icon={<Play size={15} />} disabled={b.ran || running !== null} trailing={b.ran ? "Ran" : running === b.at ? "Running…" : "Run it now"} onSelect={() => run(b)}>
+                <span className="menu-two">
+                  <span className="mono-label">{stepText(b)}</span>
+                  <span className="menu-sub">
+                    {b.rule}: {b.why}
+                  </span>
+                </span>
+              </MenuItem>
+            ))}
+          <MenuSeparator />
+          <MenuItem
+            icon={<Trash2 size={15} />}
+            onSelect={() => {
+              setAnchor(null);
+              void api.clearBlocked(chatId);
+            }}
+          >
+            Clear the list
+          </MenuItem>
         </div>
       </Popover>
     </>

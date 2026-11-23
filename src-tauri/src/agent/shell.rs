@@ -164,7 +164,7 @@ pub struct Job(isize);
 
 impl Job {
     #[cfg(windows)]
-    fn new() -> Option<Job> {
+    pub fn new() -> Option<Job> {
         use windows_sys::Win32::System::JobObjects::{
             CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -181,17 +181,17 @@ impl Job {
         }
     }
     #[cfg(windows)]
-    fn adopt(&self, process: isize) {
+    pub fn adopt(&self, process: isize) {
         unsafe {
             windows_sys::Win32::System::JobObjects::AssignProcessToJobObject(self.0 as _, process as _);
         }
     }
     #[cfg(not(windows))]
-    fn new() -> Option<Job> {
+    pub fn new() -> Option<Job> {
         None
     }
     #[cfg(not(windows))]
-    fn adopt(&self, _: isize) {}
+    pub fn adopt(&self, _: isize) {}
 }
 
 impl Drop for Job {

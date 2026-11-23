@@ -4220,6 +4220,42 @@ body.resizing .titlebar-title {
 .composer-note svg {
   flex: none;
 }
+.secrets-note {
+  color: var(--text-2);
+}
+.secrets-names {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.note-link {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--accent-ink);
+  cursor: pointer;
+}
+.note-link:hover {
+  text-decoration: underline;
+}
 .ability:disabled {
   opacity: 0.5;
+}
+
+/* Auto's blocked list in the title bar. */
+.blocked-chip.has,
+.blocked-chip.has:hover {
+  color: var(--warn);
+}
+.blocked-menu {
+  max-height: 420px;
+  overflow-y: auto;
+}
+.blocked-menu .mono-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

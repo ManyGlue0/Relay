@@ -979,6 +979,30 @@ impl Db {
         self.with(|c| c.execute("UPDATE chats SET instructions = ?2 WHERE id = ?1", params![id, text]).map(|_| ()))
     }
 
+    /// An Agent session's blocked list (Auto's refusals), oldest first.
+    pub fn blocked(&self, id: &str) -> Result<Vec<Value>, String> {
+        let text: Option<String> = self.with(|c| c.query_row("SELECT blocked FROM chats WHERE id = ?1", [id], |r| r.get(0)).optional()).map(Option::flatten)?;
+        Ok(text.and_then(|t| serde_json::from_str::<Vec<Value>>(&t).ok()).unwrap_or_default())
+    }
+
+    /// Changes the blocked list in one step (read, change, write).
+    pub fn update_blocked(&self, id: &str, f: impl FnOnce(&mut Vec<Value>)) -> Result<Vec<Value>, String> {
+        // One lock on the connection for the read and the write.
+        self.with(|c| {
+            let text: Option<String> = c.query_row("SELECT blocked FROM chats WHERE id = ?1", [id], |r| r.get(0)).optional()?.flatten();
+            let mut list = text.and_then(|t| serde_json::from_str::<Vec<Value>>(&t).ok()).unwrap_or_default();
+            f(&mut list);
+            // The newest 200.
+            if list.len() > 200 {
+                let extra = list.len() - 200;
+                list.drain(..extra);
+            }
+            let text = serde_json::to_string(&list).unwrap_or_else(|_| "[]".into());
+            c.execute("UPDATE chats SET blocked = ?2 WHERE id = ?1", params![id, text])?;
+            Ok(list)
+        })
+    }
+
     /// An Agent session's folder, set once: the workspace Relay made for it.
     pub fn set_folder(&self, id: &str, folder: &str, owned: bool) -> Result<(), String> {
         self.with(|c| {

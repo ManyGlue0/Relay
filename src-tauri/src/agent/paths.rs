@@ -28,6 +28,17 @@ pub fn expand(raw: &str) -> String {
     if let Some(rest) = s.strip_prefix("~/").or_else(|| s.strip_prefix("~\\")) {
         s = format!("{home}\\{rest}");
     }
+    // Git Bash: /c/Users is C:\Users, /tmp the temp folder.
+    if let Some(rest) = s.strip_prefix('/') {
+        let b = rest.as_bytes();
+        if !b.is_empty() && b[0].is_ascii_alphabetic() && (b.len() == 1 || b[1] == b'/') {
+            s = format!("{}:\\{}", (b[0] as char).to_ascii_uppercase(), rest.get(2..).unwrap_or(""));
+        } else if rest == "tmp" || rest.starts_with("tmp/") {
+            if let Some(t) = std::env::var_os("TEMP") {
+                s = format!("{}{}", t.to_string_lossy(), &rest[3..]);
+            }
+        }
+    }
     // %VAR%
     let re = regex::Regex::new(r"%([A-Za-z_][A-Za-z0-9_()]*)%").unwrap();
     s = re.replace_all(&s, |c: &regex::Captures| std::env::var(&c[1]).unwrap_or_else(|_| c[0].to_string())).into_owned();

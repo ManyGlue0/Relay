@@ -1176,12 +1176,44 @@ impl Job {
             return Some("Agent tools only work in Agent sessions.".into());
         };
         let mode = ctx.mode(core);
-        match crate::agent::judge(ctx, mode, tool, args) {
+        let which = crate::agent::shell::Shell::of_tool(tool);
+        let (verdict, facts) = match which {
+            Some(w) => crate::agent::judge_command(core, ctx, mode, w, args).await,
+            None => (crate::agent::judge(ctx, mode, tool, args), Default::default()),
+        };
+        // Auto's Python packages go into the folder's .venv: made first.
+        let verdict = match verdict {
+            crate::agent::Verdict::Run if mode == "auto" && facts.pip_install => match crate::agent::ensure_venv(&ctx.folder).await {
+                Ok(()) => crate::agent::Verdict::Run,
+                Err(r) => crate::agent::Verdict::Refuse(r),
+            },
+            v => v,
+        };
+        match verdict {
             crate::agent::Verdict::Refuse(r) => {
-                let text = r.text(mode);
+                let mut text = r.text(mode);
+                // A second refusal under the same rule in this reply: drop that sub-task.
+                let again = tr.parts.iter().any(|p| matches!(p, Part::Tool { status, detail: Some(d), .. } if status == "blocked" && d.pointer("/blocked/rule").and_then(Value::as_str) == Some(r.rule.as_str())));
+                if again {
+                    text.push_str("\nThis rule has refused a step twice now: drop that sub-task, note it for your final message, and carry on with the rest.");
+                }
                 set_detail(part, Some(json!({ "blocked": { "rule": r.rule, "why": r.why } })));
                 set_tool_state(part, "blocked", Some(text.clone()), None);
                 tr.set_tool(part.clone());
+                let entry = json!({
+                    "tool": tool,
+                    "args": args,
+                    "rule": r.rule,
+                    "why": r.why,
+                    "mode": mode,
+                    "at": crate::db::now_ms(),
+                    "messageId": self.message_id,
+                    "callId": part_id(part),
+                    "ran": false,
+                });
+                if let Ok(list) = core.db.update_blocked(&ctx.chat_id, |l| l.push(entry)) {
+                    let _ = self.app.emit("agent-blocked", json!({ "chatId": ctx.chat_id, "count": list.iter().filter(|e| e["ran"] != true).count() }));
+                }
                 return Some(text);
             }
             crate::agent::Verdict::Ask(note) => {
@@ -1234,24 +1266,42 @@ impl Job {
             }
         }
         let t0 = Instant::now();
-        let res = if let Some(which) = crate::agent::shell::Shell::of_tool(tool) {
+        let res = if let Some(which) = which {
+            // Auto: secrets out of the environment (allowed ones masked), the venv on PATH.
+            let (env, masks) = if mode == "auto" { crate::agent::auto_env(core, ctx) } else { Default::default() };
             // The card shows the output as it comes.
-            let env: crate::agent::shell::Env = Vec::new();
             let base = saved.clone();
-            let (out, cancelled) = crate::agent::run_command(ctx, which, args, &env, &self.token, |live| {
+            let (mut out, cancelled) = crate::agent::run_command(ctx, which, args, &env, &self.token, |live| {
                 let mut d = base.clone();
                 if let (Some(d), Some(l)) = (d.as_object_mut(), live.as_object()) {
                     for (k, v) in l {
-                        d.insert(k.clone(), v.clone());
+                        let v = match v.as_str() {
+                            Some(s) if !masks.is_empty() => json!(crate::agent::mask(s, &masks)),
+                            _ => v.clone(),
+                        };
+                        d.insert(k.clone(), v);
                     }
                 }
                 set_detail(part, Some(d));
                 tr.set_tool(part.clone());
             })
             .await;
+            if !masks.is_empty() {
+                out.text = crate::agent::mask(&out.text, &masks);
+                if let Some(o) = out.detail.as_mut().and_then(|d| d.get_mut("output")) {
+                    if let Some(s) = o.as_str() {
+                        *o = json!(crate::agent::mask(s, &masks));
+                    }
+                }
+            }
             (!cancelled).then_some(out)
         } else if tool == "processes" {
-            Some(crate::agent::processes(ctx, args))
+            let mut out = crate::agent::processes(ctx, args);
+            if mode == "auto" {
+                let (_, masks) = crate::agent::auto_env(core, ctx);
+                out.text = crate::agent::mask(&out.text, &masks);
+            }
+            Some(out)
         } else {
             tokio::select! {
                 r = crate::agent::call(ctx, tool, args) => Some(r),
@@ -1517,6 +1567,27 @@ impl Job {
                     "script" => skills::scripts_allowed(&core, &script_skill),
                     _ => false,
                 };
+                // In an Agent session: Bypass runs everything, Auto never waits
+                // (what would ask is refused).
+                let agent_mode = self.agent.as_ref().map(|c| c.mode(&core));
+                let allowed = allowed || agent_mode == Some("bypass");
+                if !allowed && agent_mode == Some("auto") {
+                    let r = crate::agent::Refusal {
+                        rule: "tools that ask".into(),
+                        why: format!("{} asks before it runs, and nobody is there to answer in Auto.", route.server),
+                        instead: "carry on without it, and mention in your final message what it would have done.".into(),
+                    };
+                    let text = r.text("auto");
+                    part = {
+                        let mut p = part;
+                        set_detail(&mut p, Some(json!({ "blocked": { "rule": r.rule, "why": r.why } })));
+                        set_tool_state(&mut p, "blocked", Some(text.clone()), None);
+                        p
+                    };
+                    tr.set_tool(part);
+                    messages.push(json!({ "role": "tool", "tool_call_id": id, "content": text }));
+                    continue;
+                }
                 if !allowed {
                     set_tool_state(&mut part, "approval", None, None);
                     tr.set_tool(part.clone());

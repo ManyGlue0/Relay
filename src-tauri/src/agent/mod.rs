@@ -6,6 +6,8 @@ pub mod checkpoints;
 pub mod diff;
 pub mod files;
 pub mod paths;
+pub mod psparse;
+pub mod rules;
 pub mod shell;
 
 use std::path::{Path, PathBuf};
@@ -382,13 +384,9 @@ pub fn judge(ctx: &Ctx, mode: &str, tool: &str, args: &Value) -> Verdict {
         return Verdict::Run;
     }
     if shell::Shell::of_tool(tool).is_some() {
+        // Commands are judged by `judge_command`, which reads them.
         return match mode {
-            "bypass" => Verdict::Run,
-            "auto" => Verdict::Refuse(Refusal {
-                rule: "commands".into(),
-                why: "Auto mode's command rules aren't available in this version.".into(),
-                instead: "use the file tools.".into(),
-            }),
+            "auto" | "bypass" => Verdict::Refuse(rules::unreadable("it wasn't checked")),
             _ => Verdict::Ask(None),
         };
     }
@@ -428,6 +426,152 @@ pub fn judge(ctx: &Ctx, mode: &str, tool: &str, args: &Value) -> Verdict {
         ("edits", Access::Write | Access::Delete) if !outside => Verdict::Run,
         (_, _) if outside => Verdict::Ask(Some(format!("{shown} is outside the session's folder."))),
         _ => Verdict::Ask(None),
+    }
+}
+
+/// A folder's key in `settings.folders`.
+pub fn folder_key(folder: &Path) -> String {
+    paths::real(folder).to_string_lossy().to_lowercase()
+}
+
+/// A folder's own settings (Auto may push, allowed secrets).
+pub fn folder_prefs(core: &Core, folder: &Path) -> crate::settings::FolderPrefs {
+    core.prefs.get().folders.get(&folder_key(folder)).cloned().unwrap_or_default()
+}
+
+/// Decides a command: read by Auto's rules (in Ask modes too, so the card can
+/// say what Auto would do). Returns what the check learned.
+pub async fn judge_command(core: &Core, ctx: &Ctx, mode: &str, which: shell::Shell, args: &Value) -> (Verdict, rules::Facts) {
+    let line = str_arg(args, "command").to_string();
+    let may_publish = folder_prefs(core, &ctx.folder).auto_push;
+    let c = ctx.clone();
+    let bypass = mode == "bypass";
+    let res = tokio::task::spawn_blocking(move || {
+        let r = rules::Rules { folder: &c.folder, credentials: &c.credentials, scratch: &c.scratch, bypass, may_publish };
+        rules::judge_line(&r, which, &line)
+    })
+    .await
+    .unwrap_or_else(|e| Err(rules::unreadable(&e.to_string())));
+    let none = rules::Facts::default;
+    match (mode, res) {
+        // Bypass refuses only reading credentials.
+        ("bypass", Err(r)) if r.rule == "reading credentials" => (Verdict::Refuse(r), none()),
+        ("bypass", _) => (Verdict::Run, none()),
+        ("auto", Err(r)) => (Verdict::Refuse(r), none()),
+        ("auto", Ok(f)) => (Verdict::Run, f),
+        (_, Err(r)) => (Verdict::Ask(Some(format!("Auto would refuse this: {}.", r.rule))), none()),
+        (_, Ok(_)) => (Verdict::Ask(None), none()),
+    }
+}
+
+/// Environment variables that hold secrets (hidden from commands in Auto).
+pub fn is_secret(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    ["_TOKEN", "_KEY", "_SECRET", "_PASSWORD", "_PAT"].iter().any(|s| n.ends_with(s))
+        || n.contains("API_KEY")
+        || matches!(n.as_str(), "GH_TOKEN" | "GITHUB_TOKEN" | "HF_TOKEN" | "AWS_ACCESS_KEY_ID" | "AWS_SECRET_ACCESS_KEY" | "AWS_SESSION_TOKEN" | "AZURE_CLIENT_SECRET" | "AZURE_CLIENT_CERTIFICATE_PASSWORD")
+}
+
+/// The secrets in Relay's environment: (name, allowed for this folder).
+pub fn secrets(core: &Core, folder: &Path) -> Vec<(String, bool)> {
+    let allowed = folder_prefs(core, folder).allow_secrets;
+    let mut out: Vec<(String, bool)> = std::env::vars_os()
+        .filter_map(|(k, _)| k.into_string().ok())
+        .filter(|k| is_secret(k))
+        .map(|k| {
+            let ok = allowed.iter().any(|a| a.eq_ignore_ascii_case(&k));
+            (k, ok)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// A command's environment in Auto: secrets removed (unless allowed), the
+/// workspace venv first on PATH. Also the allowed secrets' values, to mask.
+pub fn auto_env(core: &Core, ctx: &Ctx) -> (shell::Env, Vec<String>) {
+    let mut env = shell::Env::new();
+    let mut masks = Vec::new();
+    for (name, allowed) in secrets(core, &ctx.folder) {
+        if allowed {
+            if let Ok(v) = std::env::var(&name) {
+                if v.len() >= 4 {
+                    masks.push(v);
+                }
+            }
+        } else {
+            env.push((name, None));
+        }
+    }
+    let venv = ctx.folder.join(".venv");
+    let scripts = venv.join("Scripts");
+    if scripts.is_dir() {
+        let path = std::env::var("PATH").unwrap_or_default();
+        env.push(("PATH".into(), Some(format!("{};{path}", scripts.display()))));
+        env.push(("VIRTUAL_ENV".into(), Some(venv.display().to_string())));
+    }
+    (env, masks)
+}
+
+/// Hides secret values in text going to the model.
+pub fn mask(text: &str, masks: &[String]) -> String {
+    let mut out = text.to_string();
+    for m in masks {
+        if out.contains(m.as_str()) {
+            out = out.replace(m.as_str(), "[hidden]");
+        }
+    }
+    out
+}
+
+/// Auto installs Python packages only into the folder's `.venv`: made here
+/// when missing, with the system's packages visible (big installs like CUDA
+/// PyTorch aren't downloaded again).
+pub async fn ensure_venv(folder: &Path) -> Result<(), Refusal> {
+    let venv = folder.join(".venv");
+    if venv.join("Scripts").join("python.exe").is_file() || venv.join("bin").join("python").is_file() {
+        return Ok(());
+    }
+    let folder = folder.to_path_buf();
+    let made = tokio::task::spawn_blocking(move || {
+        let mut tried = Vec::new();
+        for (exe, pre) in [("py", vec!["-3"]), ("python", vec![]), ("python3", vec![])] {
+            let mut cmd = std::process::Command::new(exe);
+            cmd.args(&pre).args(["-m", "venv", ".venv", "--system-site-packages"]).current_dir(&folder).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x0800_0000);
+            }
+            let Ok(mut child) = cmd.spawn() else {
+                tried.push(exe);
+                continue;
+            };
+            let t0 = std::time::Instant::now();
+            loop {
+                match child.try_wait() {
+                    Ok(Some(s)) if s.success() => return true,
+                    Ok(Some(_)) | Err(_) => break,
+                    Ok(None) if t0.elapsed().as_secs() > 180 => {
+                        let _ = child.kill();
+                        break;
+                    }
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(200)),
+                }
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    if made {
+        Ok(())
+    } else {
+        Err(Refusal {
+            rule: "global installs".into(),
+            why: "Auto installs Python packages only into the folder's .venv, and it couldn't be made (no Python found, or venv failed).".into(),
+            instead: "tell the user which packages are needed.".into(),
+        })
     }
 }
 

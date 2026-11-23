@@ -56,6 +56,7 @@ export default function App() {
       on<McpStatus>("mcp-status", (st) => useStore.getState().applyMcpStatus(st)),
       on("mcp-servers-changed", () => void useStore.getState().refreshMcp()),
       on("skills-changed", () => void useStore.getState().refreshSkills()),
+      on("agent-blocked", () => useStore.setState((s) => ({ blockedSeq: s.blockedSeq + 1 }))),
       on<string>("open-chat", (id) => void useStore.getState().openChat(id)),
       on<string>("navigate", (to) => {
         if (to === "settings") useStore.getState().openSettings();

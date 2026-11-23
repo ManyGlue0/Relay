@@ -1,8 +1,8 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { AnimatePresence, motion } from "framer-motion";
-import { BookMarked, ChevronDown, CircleAlert, FilePen, FolderClosed, FolderOpen, Globe, Hand, Mic, Paperclip, Plug, Plus, RefreshCw, ShieldOff, SlidersHorizontal, Square, X, type LucideIcon } from "lucide-react";
+import { BookMarked, ChevronDown, CircleAlert, FilePen, FolderClosed, FolderOpen, Globe, Hand, KeyRound, Mic, Paperclip, Plug, Plus, RefreshCw, ShieldCheck, ShieldOff, SlidersHorizontal, Square, Upload, X, type LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api, errorText, type AgentMode } from "../lib/api";
+import { api, errorText, type AgentMode, type FolderSettings } from "../lib/api";
 import { folderName, useFolderInfo } from "../lib/folder";
 import { clock, micError, record, type Recording } from "../lib/media";
 import { spring } from "../lib/motion";
@@ -107,6 +107,7 @@ export function Composer({ chatId, streaming }: { chatId: string | null; streami
         }}
       />
       {agent && <NoToolsNote />}
+      {agent && <SecretsNote />}
       <div className="composer-bar">
         <PlusMenu />
         {agent && <FolderChip />}
@@ -379,6 +380,11 @@ function FolderChip() {
   const [anchor, setAnchor] = useState<Anchor | null>(null);
   const btn = useRef<HTMLButtonElement>(null);
   const close = () => setAnchor(null);
+  const [folderSettings, setSettings] = useState<FolderSettings | null>(null);
+  useEffect(() => {
+    if (!anchor || !folder) return;
+    void api.folderSettings(folder).then(setSettings).catch(() => {});
+  }, [anchor, folder]);
 
   const pick = async () => {
     const picked = await open({ directory: true, title: "Pick the session's folder" });
@@ -409,6 +415,7 @@ function FolderChip() {
 
   if (!folder) return null;
   const missing = info !== null && !info.exists;
+  const settings = folderSettings;
   return (
     <>
       <button
@@ -446,6 +453,18 @@ function FolderChip() {
           >
             Reload instructions
           </MenuItem>
+          {settings && (
+            <>
+              <MenuSeparator />
+              <SwitchItem
+                icon={<Upload size={15} />}
+                label="Auto may push and publish"
+                hint="In Auto: git push, gh pr create, npm publish and the like run instead of being refused (force pushes stay refused)"
+                on={settings.autoPush}
+                onChange={(on) => void api.setFolderSettings(folder, { autoPush: on }).then(setSettings)}
+              />
+            </>
+          )}
         </div>
       </Popover>
     </>
@@ -477,10 +496,44 @@ function NoToolsNote() {
   );
 }
 
+/** In Auto: the secret environment variables commands won't see, with a way
+ *  to let one through for this folder (its value stays hidden from the model). */
+function SecretsNote() {
+  const mode = useMode();
+  const folder = useStore((s) => (s.current ? s.current.folder : (s.draftOptions.folder ?? null)));
+  const [settings, setSettings] = useState<FolderSettings | null>(null);
+  const [anchor, setAnchor] = useState<Anchor | null>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (mode !== "auto" || !folder) return setSettings(null);
+    void api.folderSettings(folder).then(setSettings).catch(() => {});
+  }, [mode, folder]);
+  if (mode !== "auto" || !folder || !settings || settings.secrets.length === 0) return null;
+  const hidden = settings.secrets.filter((x) => !x.allowed).map((x) => x.name);
+  return (
+    <div className="composer-note secrets-note">
+      <KeyRound size={13} />
+      <span className="secrets-names">{hidden.length ? `Hidden from commands in Auto: ${hidden.join(", ")}` : "Every secret in the environment is allowed for this folder"}</span>
+      <button ref={btn} className="note-link" onClick={() => (anchor ? setAnchor(null) : setAnchor(anchorFrom(btn.current!, { above: true })))}>
+        Manage
+      </button>
+      <Popover anchor={anchor} onClose={() => setAnchor(null)} width={300} trigger={btn}>
+        <div className="menu">
+          <div className="menu-note">Allowed secrets reach commands in this folder; their values are hidden in what the model reads.</div>
+          {settings.secrets.map((x) => (
+            <SwitchItem key={x.name} label={x.name} on={x.allowed} onChange={(allow) => void api.setFolderSettings(folder, { secret: x.name, allow }).then(setSettings)} />
+          ))}
+        </div>
+      </Popover>
+    </div>
+  );
+}
+
 /** The permission modes the chip offers, in Shift+Tab order. */
 const MODES: { value: AgentMode; label: string; icon: LucideIcon; hint: string }[] = [
   { value: "ask", label: "Ask every time", icon: Hand, hint: "Every change and command waits for your OK" },
   { value: "edits", label: "Accept edits", icon: FilePen, hint: "File changes in the folder run; commands still ask" },
+  { value: "auto", label: "Auto", icon: ShieldCheck, hint: "Nothing waits for you: safe steps run, risky ones are refused and listed" },
   { value: "bypass", label: "Bypass", icon: ShieldOff, hint: "Everything runs without asking, except reading credentials" },
 ];
 

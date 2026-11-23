@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::attachments::{self, Attachment};
@@ -984,6 +984,116 @@ pub fn tool_answer(core: CoreState, message_id: String, call_id: String, answers
     } else {
         Err("Those questions aren't waiting anymore".into())
     }
+}
+
+/// A session's blocked list (Auto's refusals), oldest first.
+#[tauri::command]
+pub fn agent_blocked(core: CoreState, chat_id: String) -> Result<Vec<Value>, String> {
+    core.db.blocked(&chat_id)
+}
+
+/// "Run it now": runs a refused step once, as the user approved it (no
+/// rules, no hidden secrets), with a checkpoint first. Returns the entry.
+#[tauri::command]
+pub async fn agent_run_blocked(app: AppHandle, core: CoreState<'_>, chat_id: String, at: i64) -> Result<Value, String> {
+    not_while_working(&core, &chat_id)?;
+    let entry = core.db.blocked(&chat_id)?.into_iter().find(|e| e["at"].as_i64() == Some(at)).ok_or("That step is no longer in the blocked list")?;
+    if entry["ran"] == true {
+        return Err("That step already ran".into());
+    }
+    let folder = session_folder(&core, &chat_id)?;
+    let ctx = agent::Ctx::new(&core, &chat_id, &folder.to_string_lossy());
+    let tool = entry["tool"].as_str().unwrap_or("").to_string();
+    let args = entry["args"].clone();
+    // Credentials stay unread, whoever asks.
+    if let agent::Verdict::Refuse(r) = agent::judge(&ctx, "bypass", &tool, &args) {
+        if agent::shell::Shell::of_tool(&tool).is_none() {
+            return Err(r.why);
+        }
+    }
+    if agent::is_step(&tool) {
+        let message = entry["messageId"].as_str().unwrap_or("").to_string();
+        let call = entry["callId"].as_str().unwrap_or("").to_string();
+        let _ = agent::checkpoint(core.inner(), &ctx, &message, &call, &format!("Before {tool} (run from the blocked list)")).await;
+    }
+    let out = match agent::shell::Shell::of_tool(&tool) {
+        Some(which) => {
+            if let (agent::Verdict::Refuse(r), _) = agent::judge_command(&core, &ctx, "bypass", which, &args).await {
+                return Err(r.why);
+            }
+            let token = tokio_util::sync::CancellationToken::new();
+            agent::run_command(&ctx, which, &args, &Vec::new(), &token, |_| {}).await.0
+        }
+        None => agent::call(&ctx, &tool, &args).await,
+    };
+    let mut result = out.text.clone();
+    if result.len() > 4000 {
+        let mut end = 4000;
+        while !result.is_char_boundary(end) {
+            end -= 1;
+        }
+        result = format!("{}…", &result[..end]);
+    }
+    let list = core.db.update_blocked(&chat_id, |l| {
+        if let Some(e) = l.iter_mut().find(|e| e["at"].as_i64() == Some(at)) {
+            e["ran"] = json!(true);
+            e["result"] = json!(result);
+            e["error"] = json!(out.error);
+        }
+    })?;
+    let _ = app.emit("agent-blocked", json!({ "chatId": chat_id, "count": list.iter().filter(|e| e["ran"] != true).count() }));
+    list.into_iter().find(|e| e["at"].as_i64() == Some(at)).ok_or_else(|| "The entry went missing".into())
+}
+
+/// Clears a session's blocked list.
+#[tauri::command]
+pub fn agent_clear_blocked(app: AppHandle, core: CoreState, chat_id: String) -> Result<(), String> {
+    core.db.update_blocked(&chat_id, |l| l.clear())?;
+    let _ = app.emit("agent-blocked", json!({ "chatId": chat_id, "count": 0 }));
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderSettings {
+    pub auto_push: bool,
+    /// The secret environment variables Relay has: hidden in Auto unless allowed.
+    pub secrets: Vec<SecretView>,
+}
+
+#[derive(serde::Serialize)]
+pub struct SecretView {
+    pub name: String,
+    pub allowed: bool,
+}
+
+/// A folder's Auto settings and the secrets in the environment.
+#[tauri::command]
+pub fn agent_folder_settings(core: CoreState, folder: String) -> FolderSettings {
+    let path = std::path::Path::new(&folder);
+    FolderSettings {
+        auto_push: agent::folder_prefs(&core, path).auto_push,
+        secrets: agent::secrets(&core, path).into_iter().map(|(name, allowed)| SecretView { name, allowed }).collect(),
+    }
+}
+
+/// Changes a folder's Auto settings: "Auto may push and publish", and a secret allowed or hidden.
+#[tauri::command]
+pub fn agent_set_folder_settings(core: CoreState, folder: String, auto_push: Option<bool>, secret: Option<String>, allow: Option<bool>) -> FolderSettings {
+    let key = agent::folder_key(std::path::Path::new(&folder));
+    core.prefs.update(|s| {
+        let f = s.folders.entry(key).or_default();
+        if let Some(p) = auto_push {
+            f.auto_push = p;
+        }
+        if let (Some(name), Some(allow)) = (secret, allow) {
+            f.allow_secrets.retain(|n| !n.eq_ignore_ascii_case(&name));
+            if allow {
+                f.allow_secrets.push(name);
+            }
+        }
+    });
+    agent_folder_settings(core, folder)
 }
 
 /// A session's background processes.

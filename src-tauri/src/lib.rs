@@ -299,6 +299,11 @@ pub fn run() {
             commands::agent_folder_info,
             commands::agent_open_folder,
             commands::tool_answer,
+            commands::agent_blocked,
+            commands::agent_run_blocked,
+            commands::agent_clear_blocked,
+            commands::agent_folder_settings,
+            commands::agent_set_folder_settings,
             commands::agent_processes,
             commands::agent_process_stop,
             commands::agent_restore,
@@ -323,6 +328,7 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 if let Some(core) = app.try_state::<Arc<Core>>() {
                     core.mcp.shutdown();
+                    agent::psparse::stop();
                 }
             }
         });

@@ -73,6 +73,17 @@ pub struct Settings {
     pub checkpoint_budget_gb: u64,
     /// Agent sessions get a cmd.exe tool too (off: PowerShell, and Bash where installed).
     pub agent_cmd: bool,
+    /// Agent folders' own settings, by the folder's full path in lowercase.
+    pub folders: std::collections::BTreeMap<String, FolderPrefs>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FolderPrefs {
+    /// "Auto may push and publish": git push, gh pr create, npm publish…
+    pub auto_push: bool,
+    /// Secret environment variables Auto leaves in commands (their values are masked).
+    pub allow_secrets: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -168,6 +179,7 @@ impl Default for Settings {
             checkpoint_file_mb: 50,
             checkpoint_budget_gb: 2,
             agent_cmd: false,
+            folders: Default::default(),
         }
     }
 }

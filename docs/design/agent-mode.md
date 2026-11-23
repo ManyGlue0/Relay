@@ -1,6 +1,6 @@
 # Agent mode
 
-Status: **being built** (steps 1 to 5 of the build order are done). Target: Relay 0.7.0. Written 2026-11-23 from a
+Status: **being built** (steps 1 to 6 of the build order are done). Target: Relay 0.7.0. Written 2026-11-23 from a
 question-and-answer design session with Andrea and two review rounds; the first
 six open questions were answered the same day. What's still open is listed at
 the end.
@@ -443,6 +443,10 @@ Each step ends in something Andrea can test on its own.
 6. **Auto mode, rules:** the path map, the PowerShell parser and the Bash/cmd
    tokenizers, the rule table, refusals, blocked list, secrets, the workspace
    venv. A test suite of commands that must be refused and must be allowed.
+   (Built. Until step 7, Python code is only read before it runs, so code that
+   starts other programs is refused. MCP, web and skill tools that would ask
+   are refused in Auto and run in Bypass. "Run it now" runs the step without
+   the rules and without hiding secrets, after a checkpoint.)
 7. **Auto mode, Python guard:** the guard script, `sitecustomize`, the probe,
    child-process routing.
 8. **Long sessions:** summarizing near the context limit.

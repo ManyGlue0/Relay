@@ -97,6 +97,25 @@ export type ToolDecision = "once" | "always" | "deny" | "edits";
 
 /** An Agent session's permission mode. */
 export type AgentMode = "ask" | "edits" | "auto" | "bypass";
+/** A step Auto refused, kept in the session's blocked list. */
+export interface BlockedStep {
+  tool: string;
+  args: Record<string, unknown>;
+  rule: string;
+  why: string;
+  mode: AgentMode;
+  at: number;
+  messageId: string;
+  callId: string;
+  ran: boolean;
+  result?: string;
+  error?: boolean;
+}
+/** A folder's Auto settings, and the secret environment variables Relay has. */
+export interface FolderSettings {
+  autoPush: boolean;
+  secrets: { name: string; allowed: boolean }[];
+}
 /** The server's own tools, run inside its reply (Anthropic's web search). */
 export const HOSTED_SERVER = "anthropic.hosted";
 
@@ -568,6 +587,11 @@ export const api = {
   reloadInstructions: (chatId: string) => invoke<number>("agent_reload_instructions", { chatId }),
   checkpoints: (chatId: string) => invoke<Checkpoint[]>("agent_checkpoints", { chatId }),
   processes: (chatId: string) => invoke<ProcessView[]>("agent_processes", { chatId }),
+  blocked: (chatId: string) => invoke<BlockedStep[]>("agent_blocked", { chatId }),
+  runBlocked: (chatId: string, at: number) => invoke<BlockedStep>("agent_run_blocked", { chatId, at }),
+  clearBlocked: (chatId: string) => invoke<void>("agent_clear_blocked", { chatId }),
+  folderSettings: (folder: string) => invoke<FolderSettings>("agent_folder_settings", { folder }),
+  setFolderSettings: (folder: string, change: { autoPush?: boolean; secret?: string; allow?: boolean }) => invoke<FolderSettings>("agent_set_folder_settings", { folder, ...change }),
   /** Answers to the model's questions (null: closed without answering). */
   answerTool: (messageId: string, callId: string, answers: Answer[] | null) => invoke<void>("tool_answer", { messageId, callId, answers }),
   stopProcess: (chatId: string, id: number) => invoke<boolean>("agent_process_stop", { chatId, id }),

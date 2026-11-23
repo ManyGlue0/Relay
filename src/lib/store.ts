@@ -89,6 +89,8 @@ interface State {
   files: Record<string, DraftFile[]>;
   /** The Agent session's files panel is open. */
   filesPanel: boolean;
+  /** Bumped when a session's blocked list changes (`agent-blocked`). */
+  blockedSeq: number;
   /** Checkpoints pruning made unrestorable, by id (for the step cards). */
   collapsed: Record<number, true>;
 
@@ -187,6 +189,7 @@ export const useStore = create<State>((set, get) => ({
   caps: {},
   files: {},
   filesPanel: false,
+  blockedSeq: 0,
   collapsed: {},
 
   async probeProviders() {

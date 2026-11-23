@@ -1,10 +1,13 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Copy as RestoreIcon, Minus, PanelLeft, Square, X } from "lucide-react";
+import { AnimatePresence, motion } from "framer-motion";
+import { Bot, Copy as RestoreIcon, FolderClosed, GitBranch, MessageCircle, Minus, PanelLeft, Square, X } from "lucide-react";
 import { useId } from "react";
-import { api } from "../lib/api";
-import { useStore } from "../lib/store";
+import { api, type ChatKind } from "../lib/api";
+import { folderName, useFolderInfo } from "../lib/folder";
+import { spring } from "../lib/motion";
+import { useStore, useView } from "../lib/store";
 import { SECTIONS } from "./Sidebar";
-import { IconButton } from "./ui";
+import { IconButton, Pill } from "./ui";
 
 /** The collapsed sidebar's width: its icons sit on the same column as the open sidebar's. */
 export const RAIL = 54;
@@ -32,8 +35,10 @@ export function TitleBar({ sidebarWidth }: { sidebarWidth: number }) {
           <PanelLeft size={16} />
         </IconButton>
       </div>
+      <AnimatePresence initial={false}>{open && <ViewSwitch key="switch" />}</AnimatePresence>
       <div className="titlebar-title" style={{ marginLeft: titleOffset }} data-tauri-drag-region>
         <span data-tauri-drag-region>{title}</span>
+        {!settingsOpen && <SessionMeta />}
       </div>
       <div className="caption">
         <button className="caption-btn" aria-label="Minimize" onClick={() => void getCurrentWindow().minimize()}>
@@ -47,6 +52,65 @@ export function TitleBar({ sidebarWidth }: { sidebarWidth: number }) {
         </button>
       </div>
     </header>
+  );
+}
+
+/** An Agent session's folder and git branch, after its title. */
+function SessionMeta() {
+  const chat = useStore((s) => (s.current && s.current.id === s.currentId && s.current.kind === "agent" ? s.current : null));
+  const info = useFolderInfo(chat?.folder);
+  if (!chat?.folder) return null;
+  const missing = info !== null && !info.exists;
+  return (
+    <span className={`title-meta ${missing ? "missing" : ""}`} title={missing ? `${chat.folder} no longer exists` : chat.folder} data-tauri-drag-region>
+      <FolderClosed size={13} />
+      <span className="title-meta-text">{chat.folderOwned ? "Workspace" : (info?.name ?? folderName(chat.folder))}</span>
+      {info?.branch && (
+        <>
+          <GitBranch size={13} />
+          <span className="title-meta-text">{info.branch}</span>
+        </>
+      )}
+    </span>
+  );
+}
+
+/** Which icon stands for Agent (picked on screen: see docs/design/agent-mode.md). */
+
+/** Chat or Agent, beside the sidebar button (hidden while the sidebar is collapsed). */
+function ViewSwitch() {
+  const view = useView();
+  const items: { value: ChatKind; label: string; icon: typeof Bot }[] = [
+    { value: "chat", label: "Chat", icon: MessageCircle },
+    { value: "agent", label: "Agent", icon: Bot },
+  ];
+  return (
+    <motion.div
+      className="segmented view-switch"
+      style={{ left: BRAND + 2 }}
+      role="tablist"
+      initial={{ opacity: 0, scale: 0.9 }}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ opacity: 0, scale: 0.9, transition: { duration: 0.1 } }}
+      transition={spring}
+    >
+      {items.map(({ value, label, icon: Icon }) => (
+        <button
+          key={value}
+          role="tab"
+          aria-selected={view === value}
+          aria-label={label}
+          title={label}
+          className={view === value ? "on" : ""}
+          onClick={() => useStore.getState().setView(value)}
+        >
+          {view === value && <Pill layoutId="view-pill" className="segmented-pill" />}
+          <span>
+            <Icon size={16} />
+          </span>
+        </button>
+      ))}
+    </motion.div>
   );
 }
 

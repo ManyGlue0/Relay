@@ -1,7 +1,7 @@
 // Tiny Chrome DevTools Protocol driver for the Relay webview.
 // Usage: node cdp.mjs <cmd> [args...]
 //   eval "<js>"            evaluate (awaits promises), print JSON result
-//   shot <file.png>        screenshot of the page
+//   shot <file.png> [x y w h [scale]]  screenshot of the page (or a zoomed crop)
 //   click <x> <y>          mouse click at CSS px
 //   move <x> <y>           move the mouse to CSS px (hover)
 //   type "<text>"          insert text at focus
@@ -38,7 +38,10 @@ if (cmd === "eval") {
   if (r.exceptionDetails) console.log("EXCEPTION", JSON.stringify(r.exceptionDetails.exception?.description ?? r.exceptionDetails));
   else console.log(JSON.stringify(r.result.value, null, 1));
 } else if (cmd === "shot") {
-  const r = await send("Page.captureScreenshot", { format: "png" });
+  // Optional zoomed crop: shot <file> <x> <y> <w> <h> [scale]
+  const [x, y, width, height, scale] = args.slice(1).map(Number);
+  const clip = width ? { x, y, width, height, scale: scale || 4 } : undefined;
+  const r = await send("Page.captureScreenshot", { format: "png", ...(clip ? { clip, captureBeyondViewport: false } : {}) });
   writeFileSync(args[0], Buffer.from(r.data, "base64"));
   console.log("saved", args[0]);
 } else if (cmd === "click") {

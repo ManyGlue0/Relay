@@ -219,10 +219,31 @@ textarea:focus-visible {
 }
 
 .titlebar {
+  position: relative;
   flex: none;
   height: 44px;
   display: flex;
   align-items: center;
+}
+/* Chat / Agent: over the title bar's left part, so the title never moves for it. */
+.view-switch {
+  position: absolute;
+  top: 8px;
+  z-index: 1;
+}
+.segmented.view-switch button {
+  width: 32px;
+  height: 24px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+.view-switch button span {
+  display: grid;
+  place-items: center;
+}
+.view-switch .segmented-pill {
+  border-radius: 8px;
 }
 /* Fixed: the mark sits on the sidebar's icon column (x = 27) open or collapsed. */
 .brand {
@@ -259,6 +280,32 @@ textarea:focus-visible {
 }
 body.resizing .titlebar-title {
   transition: none;
+}
+/* An Agent session's folder and branch, after the title. */
+.titlebar-title .title-meta {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 45%;
+  margin-left: 12px;
+  font-weight: 500;
+  color: var(--text-3);
+  overflow: hidden;
+}
+.title-meta svg {
+  flex: none;
+}
+.title-meta svg + .title-meta-text + svg {
+  margin-left: 6px;
+}
+.titlebar-title .title-meta-text {
+  font-size: 12px;
+  font-weight: 500;
+  color: inherit;
+}
+.titlebar-title .title-meta.missing {
+  color: var(--danger);
 }
 .titlebar-title span {
   font-size: 13px;
@@ -1521,6 +1568,41 @@ body.resizing .titlebar-title {
   color: var(--text-3);
 }
 
+/* An Agent session's folder, beside the + button. */
+.folder-chip {
+  max-width: 200px;
+}
+.folder-chip.missing,
+.folder-chip.missing:hover {
+  color: var(--danger);
+}
+.folder-pick {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+.folder-pick .folder-chip {
+  padding-right: 4px;
+}
+.folder-clear {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin-left: -2px;
+  border-radius: 11px;
+  color: var(--text-3);
+}
+.folder-clear:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.folder-path {
+  word-break: break-all;
+  user-select: text;
+}
+
 /* The composer's model chip: the model, then its effort, quieter. */
 .model-chip {
   max-width: 300px;
@@ -1915,7 +1997,8 @@ body.resizing .titlebar-title {
   color: var(--text);
   font-weight: 500;
 }
-.segmented-pill {
+.segmented-pill,
+.segmented button > .segmented-pill {
   position: absolute;
   inset: 0;
   border-radius: 8px;

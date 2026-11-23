@@ -1,3 +1,4 @@
+mod agent;
 mod anthropic;
 mod attachments;
 mod chat;
@@ -295,6 +296,8 @@ pub fn run() {
             commands::chat_stop,
             commands::streaming_chats,
             commands::chat_search,
+            commands::agent_folder_info,
+            commands::agent_open_folder,
             commands::chat_markdown,
             commands::usage_stats,
             commands::holster_status,

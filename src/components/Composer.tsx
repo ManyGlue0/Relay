@@ -1,10 +1,12 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { AnimatePresence, motion } from "framer-motion";
-import { BookMarked, Globe, Mic, Paperclip, Plug, Plus, SlidersHorizontal, Square } from "lucide-react";
+import { BookMarked, FolderClosed, FolderOpen, Globe, Mic, Paperclip, Plug, Plus, SlidersHorizontal, Square, X } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { api, errorText } from "../lib/api";
+import { folderName, useFolderInfo } from "../lib/folder";
 import { clock, micError, record, type Recording } from "../lib/media";
 import { spring } from "../lib/motion";
-import { compact, useActiveModel, useChatOptions, useEscape, useStore, type DraftFile } from "../lib/store";
+import { compact, draftKeyOf, useActiveModel, useChatOptions, useEscape, useStore, viewOf, type DraftFile } from "../lib/store";
 import { AttachmentTray } from "./Attachments";
 import { ModelEffortPicker } from "./ModelPicker";
 import { MenuItem, MenuSeparator, Popover, SubmenuItem, SwitchItem, anchorFrom, type Anchor } from "./ui";
@@ -16,7 +18,7 @@ const NO_FILES: DraftFile[] = [];
 const MAX_RECORDING = 10 * 60;
 
 export function Composer({ chatId, streaming }: { chatId: string | null; streaming: boolean }) {
-  const key = chatId ?? "new";
+  const key = useStore((s) => draftKeyOf({ settings: s.settings, currentId: chatId }));
   const [text, setText] = useState(() => drafts.get(key) ?? "");
   const ref = useRef<HTMLTextAreaElement>(null);
   const model = useActiveModel();
@@ -25,6 +27,7 @@ export function Composer({ chatId, streaming }: { chatId: string | null; streami
   const files = useStore((s) => s.files[key]) ?? NO_FILES;
   const [sending, setSending] = useState(false);
   const [recording, setRecording] = useState(false);
+  const agent = useStore((s) => (s.current ? s.current.kind : (s.draftOptions.kind ?? viewOf(s))) === "agent");
 
   useEffect(() => {
     setText(drafts.get(key) ?? "");
@@ -80,7 +83,7 @@ export function Composer({ chatId, streaming }: { chatId: string | null; streami
         ref={ref}
         rows={1}
         value={text}
-        placeholder={model ? (files.length ? "Add a message, or just send" : "Message") : "Add a model in Settings to start"}
+        placeholder={model ? (files.length ? "Add a message, or just send" : agent ? "What should we work on?" : "Message") : "Add a model in Settings to start"}
         spellCheck
         onChange={(e) => update(e.target.value)}
         onPaste={(e) => {
@@ -99,6 +102,7 @@ export function Composer({ chatId, streaming }: { chatId: string | null; streami
       />
       <div className="composer-bar">
         <PlusMenu />
+        {agent && <FolderChip />}
         <div className="composer-fill" />
         <ModelEffortPicker value={model} />
         <ContextMeter />
@@ -351,6 +355,76 @@ function PlusMenu() {
           <SwitchItem icon={<BookMarked size={15} />} label="Skills" on={opts.skills} onChange={(skills) => set({ skills })} hint="The skills you turned on in Settings" />
           <SwitchItem icon={<Plug size={15} />} label="MCPs" on={opts.tools} onChange={(tools) => set({ tools })} hint="Tools from your MCP servers" />
           <SwitchItem icon={<Globe size={15} />} label="Web search" on={opts.web} onChange={(web) => set({ web })} hint="Search the web and read pages" />
+        </div>
+      </Popover>
+    </>
+  );
+}
+
+/** An Agent session's folder. Before the first message: pick one, or leave
+ *  it empty and Relay makes a workspace. After: fixed, with Open in Explorer. */
+function FolderChip() {
+  const current = useStore((s) => s.current);
+  const draftFolder = useStore((s) => s.draftOptions.folder ?? null);
+  const folder = current ? current.folder : draftFolder;
+  const info = useFolderInfo(folder);
+  const [anchor, setAnchor] = useState<Anchor | null>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  const close = () => setAnchor(null);
+
+  const pick = async () => {
+    const picked = await open({ directory: true, title: "Pick the session's folder" });
+    if (typeof picked === "string") useStore.getState().setOptions({ folder: picked });
+  };
+
+  if (!current) {
+    if (!folder) {
+      return (
+        <button className="chip folder-chip muted" title="Without one, Relay makes a workspace folder for this session" onClick={() => void pick()}>
+          <FolderOpen size={15} className="chip-icon" />
+          <span className="chip-label">Pick a folder</span>
+        </button>
+      );
+    }
+    return (
+      <div className="folder-pick">
+        <button className="chip folder-chip" title={`${folder}\nClick to pick another`} onClick={() => void pick()}>
+          <FolderClosed size={15} className="chip-icon" />
+          <span className="chip-label">{folderName(folder)}</span>
+        </button>
+        <button className="folder-clear" aria-label="No folder (Relay makes a workspace)" title="No folder (Relay makes a workspace)" onClick={() => useStore.getState().setOptions({ folder: null })}>
+          <X size={13} />
+        </button>
+      </div>
+    );
+  }
+
+  if (!folder) return null;
+  const missing = info !== null && !info.exists;
+  return (
+    <>
+      <button
+        ref={btn}
+        className={`chip folder-chip ${anchor ? "open" : ""} ${missing ? "missing" : ""}`}
+        title={missing ? `${folder} no longer exists` : folder}
+        onClick={() => (anchor ? close() : setAnchor(anchorFrom(btn.current!, { above: true })))}
+      >
+        <FolderClosed size={15} className="chip-icon" />
+        <span className="chip-label">{current.folderOwned ? "Workspace" : folderName(folder)}</span>
+      </button>
+      <Popover anchor={anchor} onClose={close} width={280} trigger={btn}>
+        <div className="menu">
+          <div className="menu-note folder-path">{folder}</div>
+          <MenuItem
+            icon={<FolderOpen size={15} />}
+            disabled={missing}
+            onSelect={() => {
+              close();
+              void api.openSessionFolder(current.id).catch((e) => useStore.getState().toast(errorText(e)));
+            }}
+          >
+            Open in Explorer
+          </MenuItem>
         </div>
       </Popover>
     </>

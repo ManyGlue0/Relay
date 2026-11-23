@@ -1,6 +1,6 @@
 # Agent mode
 
-Status: **design, not built.** Target: Relay 0.7.0. Written 2026-11-23 from a
+Status: **being built** (step 1 of the build order is done). Target: Relay 0.7.0. Written 2026-11-23 from a
 question-and-answer design session with Andrea and two review rounds; the first
 six open questions were answered the same day. What's still open is listed at
 the end.
@@ -423,9 +423,10 @@ In a git repository:
 
 Each step ends in something Andrea can test on its own.
 
-1. **The switch and sessions:** title-bar switch, separate lists grouped by
-   folder, folder chip, workspaces, session header. No new tools yet (a session
-   is a chat with a folder).
+1. **The switch and sessions** (built): title-bar switch, separate lists
+   grouped by folder (Relay's workspaces share one "Workspaces" group), folder
+   chip, workspaces, the folder and branch after the session's title. No new
+   tools yet (a session is a chat with a folder).
 2. **File tools + Ask every time:** read, write, edit, delete, list, search;
    approval cards with diffs; AGENTS.md / CLAUDE.md.
 3. **Checkpoints:** taken before steps, "Restore to before this", files panel

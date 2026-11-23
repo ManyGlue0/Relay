@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { ArrowDown, Paperclip, Plug } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { reveal, rowSpring, spring } from "../lib/motion";
-import { useStore } from "../lib/store";
+import { useStore, useView } from "../lib/store";
 import { Composer } from "./Composer";
 import { MessageView } from "./MessageView";
 import { Button, Empty } from "./ui";
@@ -13,6 +13,7 @@ export function ChatView() {
   const current = useStore((s) => s.current);
   const streaming = useStore((s) => (s.currentId ? !!s.streaming[s.currentId] : false));
   const providers = useStore((s) => s.providers);
+  const agent = useView() === "agent";
   const loading = currentId !== null && current?.id !== currentId;
 
   if (!providers.length) {
@@ -37,7 +38,7 @@ export function ChatView() {
     return (
       <div className="chat-view center">
         <motion.div className="hero" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={reveal}>
-          <h1>What’s on your mind?</h1>
+          <h1>{agent ? "What are we building?" : "What’s on your mind?"}</h1>
           <div className="hero-composer">
             <Composer chatId={null} streaming={false} />
           </div>

@@ -63,6 +63,8 @@ pub struct Settings {
     pub chat_skills: bool,
     pub chat_mcp: bool,
     pub chat_web: bool,
+    /// What the window shows: "chat" (chats) or "agent" (Agent sessions).
+    pub view: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -153,6 +155,7 @@ impl Default for Settings {
             chat_skills: true,
             chat_mcp: true,
             chat_web: false,
+            view: "chat".into(),
         }
     }
 }

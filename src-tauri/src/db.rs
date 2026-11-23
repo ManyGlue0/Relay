@@ -182,6 +182,15 @@ pub struct ChatSummary {
     pub web: bool,
     /// Out of the main list (in the sidebar's Archived group).
     pub archived: bool,
+    /// "chat", or "agent" for an Agent session.
+    pub kind: String,
+    /// The folder an Agent session works in (None until its first message,
+    /// when no folder was picked and Relay makes a workspace).
+    pub folder: Option<String>,
+    /// The folder is a workspace Relay made for the session.
+    pub folder_owned: bool,
+    /// An Agent session's permission mode; None: the default from settings.
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -229,6 +238,7 @@ pub struct SearchHit {
     /// Matched text with the hits wrapped in \u{1}…\u{2}.
     pub snippet: String,
     pub archived: bool,
+    pub kind: String,
 }
 
 pub struct Db {
@@ -282,6 +292,18 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
     chat_id UNINDEXED,
     tokenize = 'unicode61 remove_diacritics 2'
 );
+"#;
+
+/// v7: Agent sessions are chats with a kind, a folder (`folder_owned`: a
+/// workspace Relay made), a permission mode, the instructions read from the
+/// folder at the start, and the list of what Auto mode refused.
+const SCHEMA_V7: &str = r#"
+ALTER TABLE chats ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat';
+ALTER TABLE chats ADD COLUMN folder TEXT;
+ALTER TABLE chats ADD COLUMN folder_owned INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE chats ADD COLUMN mode TEXT;
+ALTER TABLE chats ADD COLUMN instructions TEXT;
+ALTER TABLE chats ADD COLUMN blocked TEXT;
 "#;
 
 /// v6: the provider's protocol, per-chat Skills and Web search switches (the
@@ -382,7 +404,10 @@ fn message_from(row: &Row) -> rusqlite::Result<Message> {
     })
 }
 
-const SUMMARY_COLS: &str = "id, title, provider_id, model, created_at, updated_at, pinned, preset_id, effort, tools, archived, skills, web";
+const SUMMARY_COLS: &str =
+    "id, title, provider_id, model, created_at, updated_at, pinned, preset_id, effort, tools, archived, skills, web, kind, folder, folder_owned, mode";
+/// The column right after `SUMMARY_COLS`.
+const AFTER_SUMMARY: usize = 17;
 
 fn summary_from(row: &Row) -> rusqlite::Result<ChatSummary> {
     Ok(ChatSummary {
@@ -399,7 +424,20 @@ fn summary_from(row: &Row) -> rusqlite::Result<ChatSummary> {
         archived: row.get::<_, i64>(10)? != 0,
         skills: row.get::<_, i64>(11)? != 0,
         web: row.get::<_, i64>(12)? != 0,
+        kind: row.get(13)?,
+        folder: row.get(14)?,
+        folder_owned: row.get::<_, i64>(15)? != 0,
+        mode: row.get(16)?,
     })
+}
+
+/// "agent" or "chat": anything else is a chat.
+pub fn kind_of(kind: Option<&str>) -> &'static str {
+    if kind == Some("agent") {
+        "agent"
+    } else {
+        "chat"
+    }
 }
 
 fn json_of<T: serde::de::DeserializeOwned + Default>(text: String) -> T {
@@ -434,6 +472,12 @@ pub struct ChatOptions {
     pub tools: Option<bool>,
     pub skills: Option<bool>,
     pub web: Option<bool>,
+    /// Only when the chat is made: "chat" or "agent".
+    pub kind: Option<String>,
+    /// Only when an Agent session is made: the folder picked for it.
+    pub folder: Option<String>,
+    /// An Agent session's permission mode ("" for the default).
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -508,6 +552,9 @@ impl Db {
         }
         if version < 6 {
             conn.execute_batch(&format!("BEGIN; {SCHEMA_V6} PRAGMA user_version = 6; COMMIT;"))?;
+        }
+        if version < 7 {
+            conn.execute_batch(&format!("BEGIN; {SCHEMA_V7} PRAGMA user_version = 7; COMMIT;"))?;
         }
         // A reply that was streaming when Relay closed will never finish.
         conn.execute("UPDATE messages SET status = 'stopped' WHERE status = 'streaming'", [])?;
@@ -719,7 +766,7 @@ impl Db {
                 &format!("SELECT {SUMMARY_COLS}, system_prompt, leaf_id FROM chats WHERE id = ?1"),
                 [id],
                 // Right after the summary's columns.
-                |r| Ok((summary_from(r)?, r.get::<_, String>(13)?, r.get::<_, Option<String>>(14)?)),
+                |r| Ok((summary_from(r)?, r.get::<_, String>(AFTER_SUMMARY)?, r.get::<_, Option<String>>(AFTER_SUMMARY + 1)?)),
             )
             .optional()
         })?;
@@ -787,8 +834,8 @@ impl Db {
         let now = now_ms();
         self.with(|c| {
             c.execute(
-                "INSERT INTO chats (id, provider_id, model, preset_id, effort, tools, skills, web, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                "INSERT INTO chats (id, provider_id, model, preset_id, effort, tools, skills, web, created_at, updated_at, kind, folder, mode)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10, ?11, ?12)",
                 params![
                     id,
                     provider_id,
@@ -798,7 +845,10 @@ impl Db {
                     opts.tools.unwrap_or(true) as i64,
                     opts.skills.unwrap_or(true) as i64,
                     opts.web.unwrap_or(false) as i64,
-                    now
+                    now,
+                    kind_of(opts.kind.as_deref()),
+                    opts.folder.as_deref().filter(|f| !f.is_empty()),
+                    opts.mode.as_deref().filter(|m| !m.is_empty()),
                 ],
             )?;
             Ok(())
@@ -825,7 +875,20 @@ impl Db {
             if let Some(t) = opts.web {
                 c.execute("UPDATE chats SET web = ?2 WHERE id = ?1", params![id, t as i64])?;
             }
+            if let Some(m) = &opts.mode {
+                let m = if m.is_empty() { None } else { Some(m.as_str()) };
+                c.execute("UPDATE chats SET mode = ?2 WHERE id = ?1", params![id, m])?;
+            }
+            // The kind and the folder are set when the chat is made: a session's
+            // folder never changes (its checkpoints and history are about it).
             Ok(())
+        })
+    }
+
+    /// An Agent session's folder, set once: the workspace Relay made for it.
+    pub fn set_folder(&self, id: &str, folder: &str, owned: bool) -> Result<(), String> {
+        self.with(|c| {
+            c.execute("UPDATE chats SET folder = ?2, folder_owned = ?3 WHERE id = ?1", params![id, folder, owned as i64]).map(|_| ())
         })
     }
 
@@ -1004,7 +1067,8 @@ impl Db {
 
     // ---- search -----------------------------------------------------------------------------
 
-    pub fn search(&self, input: &str, limit: usize) -> Result<Vec<SearchHit>, String> {
+    /// Chats (or Agent sessions: `kind`) whose title or messages match.
+    pub fn search(&self, input: &str, limit: usize, kind: &str) -> Result<Vec<SearchHit>, String> {
         let needle = input.trim().to_lowercase();
         if needle.is_empty() {
             return Ok(Vec::new());
@@ -1012,30 +1076,32 @@ impl Db {
         let mut hits: Vec<SearchHit> = Vec::new();
         // Titles first: they're what people remember.
         for chat in self.chats()? {
-            if chat.title.to_lowercase().contains(&needle) {
+            if chat.kind == kind && chat.title.to_lowercase().contains(&needle) {
                 hits.push(SearchHit {
                     chat_id: chat.id,
                     title: chat.title,
                     updated_at: chat.updated_at,
                     snippet: String::new(),
                     archived: chat.archived,
+                    kind: chat.kind,
                 });
             }
         }
         if let Some(q) = fts_query(input) {
             let found = self.with(|c| {
                 let mut st = c.prepare(
-                    "SELECT f.chat_id, c.title, c.updated_at, snippet(messages_fts, 0, char(1), char(2), '…', 14), c.archived
+                    "SELECT f.chat_id, c.title, c.updated_at, snippet(messages_fts, 0, char(1), char(2), '…', 14), c.archived, c.kind
                      FROM messages_fts f JOIN chats c ON c.id = f.chat_id
-                     WHERE messages_fts MATCH ?1 ORDER BY rank LIMIT 200",
+                     WHERE messages_fts MATCH ?1 AND c.kind = ?2 ORDER BY rank LIMIT 200",
                 )?;
-                let rows = st.query_map([q], |r| {
+                let rows = st.query_map(params![q, kind], |r| {
                     Ok(SearchHit {
                         chat_id: r.get(0)?,
                         title: r.get(1)?,
                         updated_at: r.get(2)?,
                         snippet: r.get(3)?,
                         archived: r.get::<_, i64>(4)? != 0,
+                        kind: r.get(5)?,
                     })
                 })?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -1180,7 +1246,7 @@ mod tests {
             db.scrub().unwrap();
             assert!(!on_disk("zebracornflakes"), "a deleted message's text is still in the files");
             assert!(on_disk("keepsakeword"));
-            assert_eq!(db.search("keepsakeword", 10).unwrap().len(), 1);
+            assert_eq!(db.search("keepsakeword", 10, "chat").unwrap().len(), 1);
             db.delete_all_chats().unwrap();
             assert!(!on_disk("keepsakeword"));
         }
@@ -1196,12 +1262,36 @@ mod tests {
         db.set_title(&chat.id, "Rust lifetimes", true).unwrap();
         let m = db.add_message(&chat.id, None, "user", "", &[], None, None, "streaming").unwrap();
         db.finish_message(&m.id, "Borrowing explained with café examples", "", &json!([]), "done", None, &Value::Null).unwrap();
-        assert_eq!(db.search("lifetimes", 10).unwrap().len(), 1);
-        let hits = db.search("cafe borrow", 10).unwrap();
+        assert_eq!(db.search("lifetimes", 10, "chat").unwrap().len(), 1);
+        let hits = db.search("cafe borrow", 10, "chat").unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].snippet.contains('\u{1}'));
         db.delete_chat(&chat.id).unwrap();
-        assert!(db.search("borrowing", 10).unwrap().is_empty());
+        assert!(db.search("borrowing", 10, "chat").unwrap().is_empty());
+    }
+
+    #[test]
+    fn agent_sessions_keep_their_kind_and_folder() {
+        let db = Db::memory();
+        let opts = ChatOptions { kind: Some("agent".into()), folder: Some("C:/work".into()), ..Default::default() };
+        let s = db.create_chat(None, None, &opts).unwrap();
+        assert_eq!((s.kind.as_str(), s.folder.as_deref(), s.folder_owned), ("agent", Some("C:/work"), false));
+        // Anything but "agent" is a chat.
+        let c = db.create_chat(None, None, &ChatOptions { kind: Some("odd".into()), ..Default::default() }).unwrap();
+        assert_eq!(c.kind, "chat");
+        let w = db.create_chat(None, None, &ChatOptions { kind: Some("agent".into()), ..Default::default() }).unwrap();
+        db.set_folder(&w.id, "C:/data/workspaces/x", true).unwrap();
+        db.set_chat_options(&w.id, &ChatOptions { mode: Some("auto".into()), folder: Some("C:/elsewhere".into()), ..Default::default() }).unwrap();
+        let w = db.chat(&w.id).unwrap().unwrap();
+        // The folder stays; the mode changes.
+        assert_eq!((w.summary.folder.as_deref(), w.summary.folder_owned, w.summary.mode.as_deref()), (Some("C:/data/workspaces/x"), true, Some("auto")));
+        assert!(w.leaf_id.is_none() && w.system_prompt.is_empty());
+        // Search covers one list at a time.
+        db.set_title(&s.id, "Build the parser", true).unwrap();
+        db.set_title(&c.id, "Parser questions", true).unwrap();
+        let hits = db.search("parser", 10, "agent").unwrap();
+        assert_eq!((hits.len(), hits[0].chat_id.as_str(), hits[0].kind.as_str()), (1, s.id.as_str(), "agent"));
+        assert_eq!(db.search("parser", 10, "chat").unwrap()[0].chat_id, c.id);
     }
 
     #[test]

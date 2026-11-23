@@ -11,7 +11,7 @@ use crate::attachments::{self, Attachment};
 use crate::db::{new_id, now_ms, Caps, Chat, ChatOptions, ChatSummary, McpServer, Message, Preset, Provider, SearchHit, Usage};
 use crate::mcp::{self, ServerStatus};
 use crate::settings::Settings;
-use crate::{chat, holster, llm, secrets, skills, Core};
+use crate::{agent, chat, db, holster, llm, secrets, skills, Core};
 
 type CoreState<'a> = State<'a, Arc<Core>>;
 
@@ -746,10 +746,16 @@ pub fn chat_archive(app: AppHandle, core: CoreState, id: String, archived: bool)
 }
 
 #[tauri::command]
-pub fn chat_delete(app: AppHandle, core: CoreState, id: String) -> Result<(), String> {
+pub fn chat_delete(app: AppHandle, core: CoreState, id: String, delete_folder: Option<bool>) -> Result<(), String> {
     core.streams.stop_chat(&id);
     let files = core.db.attachment_ids(Some(&id))?;
+    let summary = core.db.chat_summary(&id)?;
     core.db.delete_chat(&id)?;
+    // A workspace Relay made goes too when the user said so; a folder they
+    // picked never does.
+    if let (Some(chat), Some(true)) = (summary, delete_folder) {
+        agent::remove_workspace(&core, &chat)?;
+    }
     // Its files go too, unless another chat's message still holds them.
     attachments::forget(&files_root(&core), files, &core.db.attachment_ids(None)?);
     // Its words leave the search index and the log in the background.
@@ -812,8 +818,17 @@ pub fn chat_send(
     }
     let chat_id = match chat_id {
         Some(id) => id,
-        None => core.db.create_chat(Some(&provider_id), Some(&model), &options.unwrap_or_default())?.id,
+        None => {
+            let options = options.unwrap_or_default();
+            if let Some(folder) = options.folder.as_deref().filter(|f| !f.is_empty()) {
+                agent::check_folder(folder)?;
+            }
+            core.db.create_chat(Some(&provider_id), Some(&model), &options)?.id
+        }
     };
+    if let Some(summary) = core.db.chat_summary(&chat_id)?.filter(|c| c.kind == "agent") {
+        agent::ensure_folder(&core, &summary)?;
+    }
     let sent = chat::send(&app, &chat_id, &text, &files, &provider_id, &model)?;
     let chat = core.db.chat_summary(&chat_id)?.ok_or("That chat no longer exists")?;
     Ok(SendResult { chat, user: sent.user, assistant: sent.assistant })
@@ -884,8 +899,28 @@ pub fn streaming_chats(core: CoreState) -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn chat_search(core: CoreState, query: String) -> Result<Vec<SearchHit>, String> {
-    core.db.search(&query, 50)
+pub fn chat_search(core: CoreState, query: String, kind: Option<String>) -> Result<Vec<SearchHit>, String> {
+    core.db.search(&query, 50, db::kind_of(kind.as_deref()))
+}
+
+// ---- agent sessions -------------------------------------------------------------------
+
+/// A folder's name, whether it's there, and its git branch.
+#[tauri::command]
+pub fn agent_folder_info(path: String) -> agent::FolderInfo {
+    agent::folder_info(std::path::Path::new(&path))
+}
+
+/// Opens a session's folder in Explorer.
+#[tauri::command]
+pub fn agent_open_folder(app: AppHandle, core: CoreState, chat_id: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let chat = core.db.chat_summary(&chat_id)?.ok_or("That session no longer exists")?;
+    let folder = chat.folder.ok_or("This session has no folder yet")?;
+    if !std::path::Path::new(&folder).is_dir() {
+        return Err("That folder no longer exists".into());
+    }
+    app.opener().open_path(folder, None::<&str>).map_err(|e| e.to_string())
 }
 
 /// The conversation on screen as Markdown.

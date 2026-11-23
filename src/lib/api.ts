@@ -56,7 +56,12 @@ export interface Settings {
   chatSkills: boolean;
   chatMcp: boolean;
   chatWeb: boolean;
+  /** What the window shows: chats, or Agent sessions. */
+  view: ChatKind;
 }
+
+/** A chat, or an Agent session (a chat that works in a folder). */
+export type ChatKind = "chat" | "agent";
 
 /** A skill: a folder with SKILL.md (and maybe more files). */
 export interface Skill {
@@ -175,6 +180,13 @@ export interface ChatSummary {
   web: boolean;
   /** In the sidebar's Archived group. */
   archived: boolean;
+  kind: ChatKind;
+  /** An Agent session's folder (null until its first message when none was picked). */
+  folder: string | null;
+  /** The folder is a workspace Relay made for the session. */
+  folderOwned: boolean;
+  /** An Agent session's permission mode; null: the default. */
+  mode: string | null;
 }
 
 export type AttachmentKind = "image" | "audio" | "video" | "pdf" | "document" | "text";
@@ -282,6 +294,11 @@ export interface ChatOptions {
   tools?: boolean;
   skills?: boolean;
   web?: boolean;
+  /** Only for a new chat. */
+  kind?: ChatKind;
+  /** Only for a new Agent session: the folder picked for it (none: a workspace). */
+  folder?: string | null;
+  mode?: string | null;
 }
 
 export interface SearchHit {
@@ -290,6 +307,14 @@ export interface SearchHit {
   updatedAt: number;
   snippet: string;
   archived: boolean;
+  kind: ChatKind;
+}
+
+export interface FolderInfo {
+  name: string;
+  exists: boolean;
+  /** The git branch (or a short commit), in a repository. */
+  branch: string | null;
 }
 
 export interface HolsterStatus {
@@ -414,7 +439,8 @@ export const api = {
   renameChat: (id: string, title: string) => invoke<void>("chat_rename", { id, title }),
   pinChat: (id: string, pinned: boolean) => invoke<void>("chat_pin", { id, pinned }),
   archiveChat: (id: string, archived: boolean) => invoke<void>("chat_archive", { id, archived }),
-  deleteChat: (id: string) => invoke<void>("chat_delete", { id }),
+  /** `deleteFolder`: also the workspace Relay made for an Agent session. */
+  deleteChat: (id: string, deleteFolder = false) => invoke<void>("chat_delete", { id, deleteFolder }),
   deleteAllChats: () => invoke<void>("chats_delete_all"),
   setChatModel: (id: string, providerId: string, model: string) => invoke<void>("chat_set_model", { id, providerId, model }),
   setChatOptions: (id: string, options: ChatOptions) => invoke<ChatSummary | null>("chat_set_options", { id, options }),
@@ -429,7 +455,9 @@ export const api = {
   branch: (chatId: string, messageId: string) => invoke<Chat>("chat_branch", { chatId, messageId }),
   stop: (chatId: string) => invoke<void>("chat_stop", { chatId }),
   streamingChats: () => invoke<string[]>("streaming_chats"),
-  search: (query: string) => invoke<SearchHit[]>("chat_search", { query }),
+  search: (query: string, kind: ChatKind) => invoke<SearchHit[]>("chat_search", { query, kind }),
+  folderInfo: (path: string) => invoke<FolderInfo>("agent_folder_info", { path }),
+  openSessionFolder: (chatId: string) => invoke<void>("agent_open_folder", { chatId }),
   /** `days` null: all time. */
   usage: (days: number | null) => invoke<Usage>("usage_stats", { days }),
 

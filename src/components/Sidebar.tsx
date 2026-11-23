@@ -7,6 +7,7 @@ import {
   BookMarked,
   ChevronRight,
   Ellipsis,
+  FolderClosed,
   Info,
   MessageSquareDashed,
   Pencil,
@@ -27,7 +28,8 @@ import {
 import { forwardRef, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatSummary, SearchHit } from "../lib/api";
 import { rowSpring, spring } from "../lib/motion";
-import { useStore, type SettingsSection } from "../lib/store";
+import { useStore, useView, type SettingsSection } from "../lib/store";
+import { folderName } from "../lib/folder";
 import { dateGroup } from "../lib/time";
 import { MenuItem, MenuSeparator, Pill, Popover, type Anchor } from "./ui";
 
@@ -89,15 +91,17 @@ function SideRow({
 const ChatsNav = forwardRef<HTMLInputElement, { rail: boolean }>(function ChatsNav({ rail }, searchRef) {
   const query = useStore((s) => s.query);
   const hits = useStore((s) => s.hits);
+  const agent = useView() === "agent";
+  const things = agent ? "sessions" : "chats";
   return (
     <>
       <div className="side-actions">
-        <SideRow icon={SquarePen} label="New chat" keys="Ctrl+N" rail={rail} onClick={() => useStore.getState().newChat()} />
-        <div className="search" onClick={() => rail && openSearch()} title={rail ? "Search chats (Ctrl+K)" : undefined}>
+        <SideRow icon={SquarePen} label={agent ? "New session" : "New chat"} keys="Ctrl+N" rail={rail} onClick={() => useStore.getState().newChat()} />
+        <div className="search" onClick={() => rail && openSearch()} title={rail ? `Search ${things} (Ctrl+K)` : undefined}>
           <Search size={16} className="search-icon" />
           <input
             ref={searchRef}
-            placeholder="Search chats"
+            placeholder={`Search ${things}`}
             value={query}
             tabIndex={rail ? -1 : 0}
             onChange={(e) => useStore.getState().setQuery(e.target.value)}
@@ -133,11 +137,12 @@ function openSearch() {
 /** While Settings is open, the sidebar lists its sections. */
 function SettingsNav({ rail }: { rail: boolean }) {
   const section = useStore((s) => s.section);
+  const agent = useView() === "agent";
   const go = (id: SettingsSection) => useStore.setState({ section: id, editing: null });
   return (
     <>
       <div className="side-actions">
-        <SideRow icon={ArrowLeft} label="Back to chats" keys="Esc" rail={rail} onClick={() => useStore.getState().closeSettings()} />
+        <SideRow icon={ArrowLeft} label={agent ? "Back to sessions" : "Back to chats"} keys="Esc" rail={rail} onClick={() => useStore.getState().closeSettings()} />
       </div>
       <div className="group-label nav-label fades">Settings</div>
       <nav className="settings-nav">
@@ -149,36 +154,72 @@ function SettingsNav({ rail }: { rail: boolean }) {
   );
 }
 
-function ChatList() {
-  const all = useStore((s) => s.chats);
-  const chats = useMemo(() => all.filter((c) => !c.archived), [all]);
-  const archived = useMemo(() => all.filter((c) => c.archived), [all]);
-  const groups = useMemo(() => {
-    const out: { label: string; chats: ChatSummary[] }[] = [];
-    const now = new Date();
+interface Group {
+  key: string;
+  label: string;
+  /** A folder group's full path. */
+  title?: string;
+  folder?: boolean;
+  chats: ChatSummary[];
+}
+
+/** Chats by date; Agent sessions by folder (the workspaces Relay made
+ *  share one group), newest first. Pinned ones on top either way. */
+function groupChats(chats: ChatSummary[], agent: boolean): Group[] {
+  const out: Group[] = [];
+  const now = new Date();
+  if (!agent) {
     for (const c of chats) {
       const label = c.pinned ? "Pinned" : dateGroup(c.updatedAt, now);
       const last = out[out.length - 1];
       if (last?.label === label) last.chats.push(c);
-      else out.push({ label, chats: [c] });
+      else out.push({ key: label, label, chats: [c] });
     }
     return out;
-  }, [chats]);
+  }
+  const byKey = new Map<string, Group>();
+  for (const c of chats) {
+    const key = c.pinned ? "pinned" : c.folderOwned || !c.folder ? "workspaces" : c.folder.toLowerCase();
+    let g = byKey.get(key);
+    if (!g) {
+      g =
+        key === "pinned"
+          ? { key, label: "Pinned", chats: [] }
+          : key === "workspaces"
+            ? { key, label: "Workspaces", title: "Folders Relay made for sessions without one", folder: true, chats: [] }
+            : { key, label: folderName(c.folder!), title: c.folder!, folder: true, chats: [] };
+      byKey.set(key, g);
+      out.push(g);
+    }
+    g.chats.push(c);
+  }
+  return out;
+}
+
+function ChatList() {
+  const all = useStore((s) => s.chats);
+  const view = useView();
+  const agent = view === "agent";
+  const chats = useMemo(() => all.filter((c) => c.kind === view && !c.archived), [all, view]);
+  const archived = useMemo(() => all.filter((c) => c.kind === view && c.archived), [all, view]);
+  const groups = useMemo(() => groupChats(chats, agent), [chats, agent]);
 
   if (!chats.length && !archived.length) {
     return (
       <div className="list-empty">
-        <MessageSquareDashed size={18} />
-        <span>Your chats will show up here</span>
+        {agent ? <FolderClosed size={18} /> : <MessageSquareDashed size={18} />}
+        <span>{agent ? "Your sessions will show up here" : "Your chats will show up here"}</span>
       </div>
     );
   }
   return (
     <>
-      {archived.length > 0 && <ArchivedGroup chats={archived} />}
+      {archived.length > 0 && <ArchivedGroup key={view} chats={archived} />}
       {groups.map((g) => (
-        <section key={g.label} className="chat-group">
-          <div className="group-label">{g.label}</div>
+        <section key={g.key} className="chat-group">
+          <div className={`group-label ${g.folder ? "folder-label" : ""}`} title={g.title}>
+            {g.label}
+          </div>
           <AnimatePresence initial={false}>
             {g.chats.map((c) => (
               <ChatRow key={c.id} chat={c} />
@@ -235,14 +276,34 @@ function ChatRow({ chat }: { chat: ChatSummary }) {
   const streaming = useStore((s) => !!s.streaming[chat.id]);
   const [menu, setMenu] = useState<Anchor | null>(null);
   const [renaming, setRenaming] = useState(false);
-  const [confirming, setConfirming] = useState(false);
+  /** Deleting: first the session, then (for a workspace Relay made) its files. */
+  const [confirming, setConfirming] = useState<false | "chat" | "workspace">(false);
   const more = useRef<HTMLButtonElement>(null);
+  const session = chat.kind === "agent";
 
+  if (confirming === "workspace") {
+    return (
+      <motion.div key="ws" layout className="chat-row confirm" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={rowSpring}>
+        <span className="confirm-text" title={chat.folder ?? undefined}>
+          Its workspace too?
+        </span>
+        <button className="confirm-yes" onClick={() => void useStore.getState().deleteChat(chat.id, true)}>
+          Delete
+        </button>
+        <button className="confirm-no" autoFocus title="Delete the session, keep its folder" onClick={() => void useStore.getState().deleteChat(chat.id, false)}>
+          Keep
+        </button>
+      </motion.div>
+    );
+  }
   if (confirming) {
     return (
       <motion.div layout className="chat-row confirm" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={rowSpring}>
-        <span className="confirm-text">Delete this chat?</span>
-        <button className="confirm-yes" onClick={() => void useStore.getState().deleteChat(chat.id)}>
+        <span className="confirm-text">{session ? "Delete this session?" : "Delete this chat?"}</span>
+        <button
+          className="confirm-yes"
+          onClick={() => (session && chat.folderOwned && chat.folder ? setConfirming("workspace") : void useStore.getState().deleteChat(chat.id))}
+        >
           Delete
         </button>
         <button className="confirm-no" autoFocus onClick={() => setConfirming(false)}>
@@ -270,7 +331,7 @@ function ChatRow({ chat }: { chat: ChatSummary }) {
       aria-current={active}
     >
       {active && <Pill layoutId="chat-pill" className="row-pill" />}
-      {renaming ? <Rename chat={chat} onDone={() => setRenaming(false)} /> : <span className="chat-title">{chat.title || "New chat"}</span>}
+      {renaming ? <Rename chat={chat} onDone={() => setRenaming(false)} /> : <span className="chat-title">{chat.title || (session ? "New session" : "New chat")}</span>}
       {streaming && <span className="live-dot" aria-label="Replying" />}
       {!renaming && (
         <button
@@ -321,7 +382,7 @@ function ChatRow({ chat }: { chat: ChatSummary }) {
             icon={<Trash2 size={15} />}
             onSelect={() => {
               setMenu(null);
-              setConfirming(true);
+              setConfirming("chat");
             }}
           >
             Delete…
@@ -365,17 +426,19 @@ function Rename({ chat, onDone }: { chat: ChatSummary; onDone: () => void }) {
 
 function Results({ hits }: { hits: SearchHit[] }) {
   const currentId = useStore((s) => s.currentId);
+  const agent = useView() === "agent";
+  const [one, many] = agent ? ["session", "sessions"] : ["chat", "chats"];
   if (!hits.length) {
     return (
       <div className="list-empty">
         <SearchX size={18} />
-        <span>No chats match</span>
+        <span>No {many} match</span>
       </div>
     );
   }
   return (
     <section className="chat-group">
-      <div className="group-label">{hits.length === 1 ? "1 chat" : `${hits.length} chats`}</div>
+      <div className="group-label">{hits.length === 1 ? `1 ${one}` : `${hits.length} ${many}`}</div>
       {hits.map((h, i) => (
         <motion.button
           key={h.chatId}
@@ -386,7 +449,7 @@ function Results({ hits }: { hits: SearchHit[] }) {
           onClick={() => void useStore.getState().openChat(h.chatId)}
         >
           <span className="hit-head">
-            <span className="hit-title">{h.title || "New chat"}</span>
+            <span className="hit-title">{h.title || (agent ? "New session" : "New chat")}</span>
             {h.archived && <span className="hit-tag">Archived</span>}
           </span>
           {h.snippet && <span className="hit-snippet">{highlighted(h.snippet)}</span>}

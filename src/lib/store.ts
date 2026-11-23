@@ -8,6 +8,7 @@ import {
   type Ability,
   type Attachment,
   type Chat,
+  type ChatKind,
   type ChatOptions,
   type ChatSummary,
   type Effort,
@@ -96,6 +97,8 @@ interface State {
   refreshSkills(): Promise<void>;
   openChat(id: string): Promise<void>;
   newChat(): void;
+  /** Chat or Agent: the sidebar's list, and what "New" makes. */
+  setView(view: ChatKind): void;
   send(text: string): Promise<boolean>;
   /** `keep`: the ids of the original's attachments that stay. */
   edit(messageId: string, text: string, keep: string[]): Promise<boolean>;
@@ -117,7 +120,8 @@ interface State {
   openAttachment(id: string): Promise<void>;
   ensureCaps(ref: ModelRef): void;
   setCap(ref: ModelRef, ability: Ability, on: boolean | null): Promise<void>;
-  deleteChat(id: string): Promise<void>;
+  /** `deleteFolder`: an Agent session's workspace goes too. */
+  deleteChat(id: string, deleteFolder?: boolean): Promise<void>;
   pickModel(ref: ModelRef): void;
   setOptions(opts: ChatOptions): void;
   applyDelta(d: StreamDelta): void;
@@ -141,6 +145,8 @@ const early: Record<string, StreamDelta[]> = {};
 /** Replies that ended, kept a moment: a fast reply can end before the send
  *  that started it comes back, and the send would mark it streaming again. */
 const ended: Record<string, Message> = {};
+/** The chat and the session last open, to come back to from the other view. */
+const lastOpen: Record<ChatKind, string | null> = { chat: null, agent: null };
 
 export const useStore = create<State>((set, get) => ({
   loaded: false,
@@ -200,7 +206,7 @@ export const useStore = create<State>((set, get) => ({
       mcp,
       skills,
       chats,
-      draftOptions: draftFrom(settings),
+      draftOptions: draftFrom(settings, settings.view),
       streaming: Object.fromEntries(streaming.map((id) => [id, true] as const)),
       loaded: true,
     });
@@ -227,6 +233,13 @@ export const useStore = create<State>((set, get) => ({
 
   async openChat(id) {
     set({ settingsOpen: false });
+    // A session opened from Holster or a notification brings its own view.
+    const kind = get().chats.find((c) => c.id === id)?.kind;
+    if (kind && kind !== viewOf(get())) {
+      lastOpen[viewOf(get())] = get().currentId;
+      void get().updateSettings({ view: kind });
+      if (get().query) get().setQuery(get().query);
+    }
     if (get().currentId === id && get().current) {
       set((s) => ({ focusComposer: s.focusComposer + 1 }));
       return;
@@ -254,10 +267,25 @@ export const useStore = create<State>((set, get) => ({
       currentId: null,
       current: null,
       draftModel: null,
-      draftOptions: s.settings ? draftFrom(s.settings) : {},
+      draftOptions: s.settings ? draftFrom(s.settings, viewOf(s)) : {},
       settingsOpen: false,
       focusComposer: s.focusComposer + 1,
     });
+  },
+
+  setView(view) {
+    const st = get();
+    if (view === viewOf(st)) {
+      if (st.settingsOpen) st.closeSettings();
+      return;
+    }
+    lastOpen[viewOf(st)] = st.currentId;
+    void st.updateSettings({ view });
+    const back = lastOpen[view];
+    if (back && st.chats.some((c) => c.id === back && c.kind === view)) void get().openChat(back);
+    else get().newChat();
+    // Search covers the list on screen.
+    if (st.query) get().setQuery(st.query);
   },
 
   async send(text) {
@@ -268,7 +296,7 @@ export const useStore = create<State>((set, get) => ({
       return false;
     }
     const chatId = st.currentId;
-    const draftKey = chatId ?? "new";
+    const draftKey = draftKeyOf(st);
     const files = st.files[draftKey] ?? [];
     if (files.some((f) => !f.ready)) {
       st.toast("Wait a moment: a file is still being prepared");
@@ -395,14 +423,15 @@ export const useStore = create<State>((set, get) => ({
         current: s.current?.id === id ? { ...s.current, archived } : s.current,
         hits: s.hits?.map((h) => (h.chatId === id ? { ...h, archived } : h)) ?? null,
       }));
-      if (archived) get().toast("Chat archived", { label: "Undo", run: () => void get().archiveChat(id, false) });
+      const what = get().chats.find((c) => c.id === id)?.kind === "agent" ? "Session" : "Chat";
+      if (archived) get().toast(`${what} archived`, { label: "Undo", run: () => void get().archiveChat(id, false) });
     } catch (e) {
       get().toast(errorText(e));
     }
   },
 
   async attach(src) {
-    const key = get().currentId ?? "new";
+    const key = draftKeyOf(get());
     const jobs: { key: string; name: string; add: () => Promise<Attachment> }[] = [];
     for (const path of src.paths ?? []) {
       jobs.push({ key: tempKey(), name: path.split(/[\\/]/).pop() || "file", add: () => api.attachPath(path) });
@@ -434,7 +463,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   async attachVoice(wav, seconds) {
-    const key = get().currentId ?? "new";
+    const key = draftKeyOf(get());
     const tmp = tempKey();
     set((s) => ({ files: { ...s.files, [key]: [...(s.files[key] ?? []), { key: tmp, name: "Voice message", ready: false }] } }));
     try {
@@ -447,7 +476,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   detach(fileKey) {
-    const key = get().currentId ?? "new";
+    const key = draftKeyOf(get());
     const f = get().files[key]?.find((x) => x.key === fileKey);
     dropFile(key, fileKey);
     if (f?.attachment) void api.attachDiscard([f.attachment.id]).catch(() => {});
@@ -480,9 +509,9 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  async deleteChat(id) {
+  async deleteChat(id, deleteFolder = false) {
     try {
-      await api.deleteChat(id);
+      await api.deleteChat(id, deleteFolder);
       set((s) => {
         const streaming = { ...s.streaming };
         delete streaming[id];
@@ -633,7 +662,7 @@ export const useStore = create<State>((set, get) => ({
       set({ hits: null });
       return;
     }
-    void api.search(query).then((hits) => {
+    void api.search(query, viewOf(get())).then((hits) => {
       if (seq === searchSeq) set({ hits });
     });
   },
@@ -744,8 +773,23 @@ export function useActiveModel(): ModelRef | null {
 
 /** The options the composer shows: the chat's, or the draft's. */
 /** A new chat's options: the default preset and the switches used last. */
-function draftFrom(settings: Settings): ChatOptions {
-  return { presetId: settings.defaultPreset, tools: settings.chatMcp, skills: settings.chatSkills, web: settings.chatWeb };
+function draftFrom(settings: Settings, kind: ChatKind): ChatOptions {
+  return { presetId: settings.defaultPreset, tools: settings.chatMcp, skills: settings.chatSkills, web: settings.chatWeb, kind, folder: null };
+}
+
+/** Chat or Agent. */
+export function viewOf(s: Pick<State, "settings">): ChatKind {
+  return s.settings?.view === "agent" ? "agent" : "chat";
+}
+
+export function useView(): ChatKind {
+  return useStore((s) => viewOf(s));
+}
+
+/** Where the composer's text and files wait: the chat's id, or the new chat's
+ *  (one for chats, one for sessions). */
+export function draftKeyOf(s: Pick<State, "settings" | "currentId">): string {
+  return s.currentId ?? (viewOf(s) === "agent" ? "new-agent" : "new");
 }
 
 export function useChatOptions(): { presetId: string | null; effort: Effort | null; tools: boolean; skills: boolean; web: boolean } {

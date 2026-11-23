@@ -1,8 +1,9 @@
 # Agent mode
 
 Status: **design, not built.** Target: Relay 0.7.0. Written 2026-11-23 from a
-question-and-answer design session with Andrea and two review rounds. Points
-marked **Open** are not decided yet; everything else is the agreed default.
+question-and-answer design session with Andrea and two review rounds; the first
+six open questions were answered the same day. What's still open is listed at
+the end.
 
 ## What it is
 
@@ -58,9 +59,9 @@ Non-goals (for now):
   session, `<data>\workspaces\<session id>\`, and shows it in the chip with
   "Open in Explorer". Deleting the session asks whether to delete its workspace
   too (a picked folder is never deleted).
-- The folder is fixed once the session has started (changing it mid-session
-  would make checkpoints and the conversation lie). **Open:** allow "continue
-  in another folder" as a new session that carries a summary.
+- The folder is fixed once the session has started: changing it mid-session
+  would make checkpoints and the conversation lie. Work in another folder is a
+  new session.
 - The session header shows the folder and, in a git repository, the branch.
 
 ## What the model gets
@@ -91,6 +92,7 @@ Agent tools live on a new route server `relay.agent` / `Agent` (like
 | `agent__powershell` | Runs a command in PowerShell. Always offered. |
 | `agent__bash` | Runs a command in Git Bash. Offered only when Git Bash is installed. |
 | `agent__cmd` | Runs a command in cmd.exe. A setting, **off by default** (small models trip on cmd's escaping, and three shells confuse them). |
+| `agent__processes` | Background processes: list, read recent output, stop. |
 | `agent__todo` | The session's to-do list: the model writes and ticks steps; shown in the chat. |
 | `agent__ask_user` | Questions with options (Relay's AskUserQuestion). Not offered in Auto or Bypass. |
 
@@ -99,8 +101,14 @@ Agent tools live on a new route server `relay.agent` / `Agent` (like
 - Commands run **in the folder**, without a window, inside Relay's
   kill-on-close job object (as MCP servers and skill scripts do, `mcp.rs`), with
   a time limit (default 2 minutes, `timeout` up to 10) and output capped through
-  `limits.rs`. **Open:** long-running processes (a dev server): a
-  `background: true` option with a process list and a stop button.
+  `limits.rs`.
+- **Long-running processes** (a dev server, a watcher): shell tools take
+  `background: true`. The command keeps running; the tool returns at once with
+  a process id and the first lines of output. `agent__processes` lists them,
+  reads a process's recent output (the last 1 MB is kept) and stops one. At
+  most 5 per session; the session header shows them with stop buttons; all of
+  them end when Relay quits (the job object). Auto checks a background command
+  with the same rules as any other.
 - Paths in file tools are relative to the folder; absolute paths go through the
   same rules as commands.
 - Web search, MCP servers and skills are offered in sessions too, under their
@@ -125,14 +133,19 @@ session; a new session starts with the mode used last.
 |---|---|---|---|---|
 | Read files in the folder | runs | runs | runs | runs |
 | Write / edit files in the folder | asks | runs | runs | runs |
-| Delete in the folder | asks | asks | refused | runs |
+| Delete in the folder | asks | asks (a delete isn't an edit) | refused | runs |
 | Commands | ask | ask | run if the rules allow, else refused | run |
 | Anything outside the folder | asks | asks | rules (below) | runs |
 | Web, MCP, skills | their own policies | their own policies | their own policies, "ask" counts as refused | run |
 | Checkpoints | yes | yes | yes | yes |
 | Secrets hidden from commands | no | no | yes | no |
+| Reading credential locations | asks | asks | refused | runs |
 
-- **Bypass** shows the chip in the warning color while on.
+- **Bypass** is full risk, by decision: it runs everything, credentials
+  included, and shows the chip in the warning color while on. Its risk worth
+  knowing is prompt injection: a web page, an MCP result or a file in the
+  folder can tell the model to do something, and in Bypass nothing stands in
+  the way.
 - In **Ask** modes, an approval card for a command that Auto would refuse says
   so ("Auto would refuse this: deletes files"), so the rules teach themselves.
 
@@ -291,6 +304,7 @@ Don't try another way to do the same thing: carry on with the rest of the task.
 - **Reads by compiled programs** of credential files aren't seen.
 - The guards target accidents. A model writing deliberately disguised code can
   get around static checks (the Python hook still holds).
+- **Bypass** has no guard at all (see Permission modes).
 
 ## Checkpoints
 
@@ -406,17 +420,20 @@ Each step ends in something Andrea can test on its own.
 9. **Git and background:** branch, checkpoint commit, see all changes,
    notifications for approvals.
 
-## Open questions
+## Decided after the first draft
 
-1. **Long-running processes** (dev servers, watchers): a `background` option
-   with a process list and stop buttons, or out of scope for 0.7.0?
-2. **Changing folder mid-session:** never, or "continue in another folder" as a
-   new session with a summary?
-3. **Accept edits and deletes in the folder:** ask (as above), or treat deletes
-   inside the folder as edits since checkpoints can undo them?
-4. **Models without tool calling:** hide them in Agent's model picker, or show
-   them with a warning?
-5. **Bypass and the credential list:** Bypass runs everything; should reading
-   credentials still be refused there (it costs nothing in normal work)?
-6. **The agent icon** for the switch (Lucide `bot`, `square-terminal`,
-   `sparkles`?): to try on screen and center optically.
+1. Long-running processes: yes, in 0.7.0 (`background: true`, `agent__processes`).
+2. Changing folder mid-session: no.
+3. Accept edits: deletes still ask.
+4. Models without tool calling: no gating; they fail visibly and the user picks
+   another model.
+5. Bypass: full risk, credentials included.
+6. The agent icon: try a code mark (Lucide `code-xml`, as in Claude Desktop)
+   and a robot face (`bot`) on screen beside the chat bubble, measure the
+   optical centering, pick one.
+
+## Still open
+
+- A small "no tools" badge in Agent's model picker for models the server says
+  can't call tools (Ollama's `capabilities`, OpenRouter's
+  `supported_parameters`), without blocking them.

@@ -1,5 +1,6 @@
 import { motion } from "framer-motion";
 import {
+  Activity,
   ChevronRight,
   CircleAlert,
   CircleCheck,
@@ -13,9 +14,10 @@ import {
   RotateCcw,
   Search,
   ShieldQuestion,
+  SquareTerminal,
   Trash2,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { DiffRow, Part, ToolDecision, ToolDetail } from "../lib/api";
 import { spring } from "../lib/motion";
 import { useStore } from "../lib/store";
@@ -64,6 +66,17 @@ function face(part: ToolPart, detail: ToolDetail) {
       return { icon: <FolderTree size={13} />, name: str("glob") || path, verb: "List", ask: "List this folder?" };
     case "search":
       return { icon: <Search size={13} />, name: str("pattern"), verb: "Search", ask: "Search here?" };
+    case "powershell":
+    case "bash":
+    case "cmd":
+      return {
+        icon: <SquareTerminal size={13} />,
+        name: str("command").split("\n")[0],
+        verb: part.tool === "powershell" ? "PowerShell" : part.tool === "bash" ? "Bash" : "cmd",
+        ask: a.background ? "Run this in the background?" : "Run this command?",
+      };
+    case "processes":
+      return { icon: <Activity size={13} />, name: [str("action") || "list", a.id != null ? String(a.id) : ""].filter(Boolean).join(" "), verb: "Processes", ask: "" };
     default:
       return { icon: <FileText size={13} />, name: part.tool, verb: "Agent", ask: "Let the model do this?" };
   }
@@ -72,11 +85,18 @@ function face(part: ToolPart, detail: ToolDetail) {
 /** Steps whose approval can switch the session to Accept edits. */
 const EDITS = new Set(["write_file", "edit_file", "delete_path"]);
 
+const SHELLS = new Set(["powershell", "bash", "cmd"]);
+
 export function AgentToolCard({ part, messageId }: { part: ToolPart; messageId: string }) {
   const [open, setOpen] = useState(false);
   const detail: ToolDetail = part.detail ?? {};
   const f = face(part, detail);
-  const st = STATUS[part.status] ?? STATUS.running;
+  const command = SHELLS.has(part.tool);
+  let st = STATUS[part.status] ?? STATUS.running;
+  // Commands say how they ended.
+  if (command && part.status === "done" && detail.process != null) st = { label: `In the background · ${detail.process}`, icon: <Activity size={14} /> };
+  else if (command && (part.status === "done" || part.status === "error") && detail.timedOut) st = { label: "Timed out", icon: <CircleAlert size={14} /> };
+  else if (command && part.status === "error" && detail.exit != null) st = { label: `Exit ${detail.exit}`, icon: <CircleAlert size={14} /> };
   const asking = part.status === "approval";
   const diff = detail.diff;
   const showDiff = !!diff && (asking || part.status === "done") && diff.hunks.length > 0;
@@ -104,6 +124,8 @@ export function AgentToolCard({ part, messageId }: { part: ToolPart; messageId: 
         </motion.span>
       </button>
       {showDiff && <DiffView rows={diff.hunks} truncated={diff.truncated} />}
+      {command && asking && <pre className="cmd-line">{(() => { try { return (JSON.parse(part.arguments) as { command?: string }).command ?? part.arguments; } catch { return part.arguments; } })()}</pre>}
+      {command && !asking && (open || part.status === "running") && <Terminal text={detail.output ?? ""} live={part.status === "running"} />}
       {part.status === "blocked" && detail.blocked && (
         <div className="blocked-why">
           <strong>{detail.blocked.rule}</strong>: {detail.blocked.why}
@@ -122,7 +144,7 @@ export function AgentToolCard({ part, messageId }: { part: ToolPart; messageId: 
             <Button variant="ghost" onClick={() => decide("deny")}>
               Deny
             </Button>
-            {EDITS.has(part.tool) && !detail.note && (
+            {EDITS.has(part.tool) && !detail.note && !command && (
               <Button variant="default" onClick={() => decide("edits")} title="Switch this session to Accept edits: file changes in the folder stop asking">
                 Accept edits from now
               </Button>
@@ -135,13 +157,27 @@ export function AgentToolCard({ part, messageId }: { part: ToolPart; messageId: 
       )}
       {detail.checkpoint != null && !asking && part.status !== "running" && part.status !== "denied" && <RestoreBar checkpoint={detail.checkpoint} />}
       {detail.unprotected && !asking && <div className="tool-unprotected">Not undoable: {detail.unprotected}</div>}
-      {open && !asking && (
+      {open && !asking && !command && (
         <div className="tool-body">
           {part.result != null && <pre className="tool-result">{part.result || "(empty)"}</pre>}
           {part.result == null && <pre className="tool-args">{part.arguments}</pre>}
         </div>
       )}
     </div>
+  );
+}
+
+/** A command's output, terminal style; follows the end while it runs. */
+function Terminal({ text, live }: { text: string; live: boolean }) {
+  const ref = useRef<HTMLPreElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (el && live) el.scrollTop = el.scrollHeight;
+  }, [text, live]);
+  return (
+    <pre ref={ref} className="terminal">
+      {text || (live ? "Waiting for output…" : "No output.")}
+    </pre>
   );
 }
 

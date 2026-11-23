@@ -6,6 +6,7 @@ pub mod checkpoints;
 pub mod diff;
 pub mod files;
 pub mod paths;
+pub mod shell;
 
 use std::path::{Path, PathBuf};
 
@@ -71,8 +72,44 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> &'a str {
     args.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-/// The agent tools, in a fixed order (the prompt cache).
-pub fn tool_specs() -> Vec<(&'static str, &'static str, Value)> {
+fn shell_schema() -> Value {
+    json!({ "type": "object", "properties": {
+        "command": { "type": "string", "description": "The command line to run." },
+        "timeout": { "type": "integer", "description": "Seconds before it's stopped (default 120, at most 600)." },
+        "background": { "type": "boolean", "description": "Keep it running in the background (a dev server, a watcher) and return at once with its first output." }
+    }, "required": ["command"] })
+}
+
+/// The agent tools, in a fixed order (the prompt cache). Bash is offered
+/// where Git Bash is installed, cmd when Settings turn it on.
+pub fn tool_specs(cmd: bool) -> Vec<(&'static str, String, Value)> {
+    let mut out: Vec<(&'static str, String, Value)> = file_specs().into_iter().map(|(n, d, s)| (n, d.to_string(), s)).collect();
+    let (_, pwsh) = shell::powershell();
+    let limits = "It runs in the session's folder, with no window and no input (don't start interactive programs or editors), and stops after 120 s unless you pass a timeout (up to 600). For servers and watchers that keep running, set background: true and look at them with processes.";
+    out.push((
+        "powershell",
+        format!("Runs a command in {} and returns its output and exit code. {limits}", if pwsh { "PowerShell 7 (pwsh)" } else { "Windows PowerShell 5.1" }),
+        shell_schema(),
+    ));
+    if shell::git_bash().is_some() {
+        out.push(("bash", format!("Runs a command in Git Bash (bash with the usual Unix tools, on Windows; paths like /c/Users work) and returns its output and exit code. {limits}"), shell_schema()));
+    }
+    if cmd {
+        out.push(("cmd", format!("Runs a command in cmd.exe and returns its output and exit code. {limits}"), shell_schema()));
+    }
+    out.push((
+        "processes",
+        "The session's background processes: list them, read one's recent output, or stop one.".to_string(),
+        json!({ "type": "object", "properties": {
+            "action": { "type": "string", "enum": ["list", "read", "stop"] },
+            "id": { "type": "integer", "description": "The process, for read and stop." },
+            "lines": { "type": "integer", "description": "How much recent output to read (characters, default 4000)." }
+        }, "required": ["action"] }),
+    ));
+    out
+}
+
+fn file_specs() -> Vec<(&'static str, &'static str, Value)> {
     let path = |what: &str| json!({ "type": "string", "description": what });
     vec![
         (
@@ -141,7 +178,7 @@ pub fn prompt(folder: &str, mode: &str, instructions: Option<&str>) -> String {
     let mut out = format!(
         "You're working in the folder {folder} as a coding and writing agent, with tools to read, write and edit files there (and more). \
 Work step by step until the task is done: look before you change things (list, search, read_file), make focused changes (edit_file for parts of a file, write_file for new files), \
-and check your work. Paths are relative to the folder. Don't claim to have changed a file unless a tool call did it. \
+run commands to build, test and check your work (prefer the file tools over shell commands for reading and editing files). Paths are relative to the folder. Don't claim to have changed a file unless a tool call did it. \
 When you're done, say briefly what you did and anything left open.\n\n{rules}"
     );
     if let Some(text) = instructions.filter(|t| !t.trim().is_empty()) {
@@ -217,9 +254,24 @@ fn access_of(tool: &str) -> Access {
     }
 }
 
-/// Decides a file tool call in `mode` (see the spec's table).
+/// Decides a tool call in `mode` (see the spec's table).
 pub fn judge(ctx: &Ctx, mode: &str, tool: &str, args: &Value) -> Verdict {
     use paths::Zone;
+    if tool == "processes" {
+        // Only the session's own background processes.
+        return Verdict::Run;
+    }
+    if shell::Shell::of_tool(tool).is_some() {
+        return match mode {
+            "bypass" => Verdict::Run,
+            "auto" => Verdict::Refuse(Refusal {
+                rule: "commands".into(),
+                why: "Auto mode's command rules aren't available in this version.".into(),
+                instead: "use the file tools.".into(),
+            }),
+            _ => Verdict::Ask(None),
+        };
+    }
     let access = access_of(tool);
     let raw = str_arg(args, "path");
     let path = paths::resolve(&ctx.folder, raw);
@@ -277,6 +329,96 @@ pub async fn checkpoint(core: &std::sync::Arc<Core>, ctx: &Ctx, message_id: &str
 /// What a call would change, for its approval card.
 pub fn preview(ctx: &Ctx, tool: &str, args: &Value) -> Option<Value> {
     files::preview(&ctx.folder, tool, args)
+}
+
+/// Runs a shell tool. `tick` gets the output's end while it runs.
+pub async fn run_command(
+    ctx: &Ctx,
+    which: shell::Shell,
+    args: &Value,
+    env: &shell::Env,
+    token: &tokio_util::sync::CancellationToken,
+    mut tick: impl FnMut(Value),
+) -> (files::Outcome, bool) {
+    let fail = |t: String| (files::Outcome { text: t, error: true, detail: None }, false);
+    let command = str_arg(args, "command").trim().to_string();
+    if command.is_empty() {
+        return fail("Give the command to run".into());
+    }
+    let timeout = std::time::Duration::from_secs(args.get("timeout").and_then(Value::as_u64).unwrap_or(shell::DEFAULT_TIMEOUT).clamp(1, shell::MAX_TIMEOUT));
+    let background = args.get("background").and_then(Value::as_bool).unwrap_or(false);
+    let procs = shell::Processes::global();
+    if background && procs.running(&ctx.chat_id) >= shell::MAX_BACKGROUND {
+        return fail(format!("{} background processes are already running: stop one with processes first.", shell::MAX_BACKGROUND));
+    }
+    let run = match shell::start(which, &command, &ctx.folder, env) {
+        Ok(r) => r,
+        Err(e) => return fail(e),
+    };
+    if background {
+        let (id, out) = procs.adopt(&ctx.chat_id, which, &command, run);
+        // A moment for the first lines (a server's address, an early error).
+        for _ in 0..15 {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            if out.lock().unwrap().tail(200).lines().count() >= 2 || procs.read(&ctx.chat_id, id, 10).is_some_and(|r| !r.1) {
+                break;
+            }
+        }
+        let (text, running, code, _) = procs.read(&ctx.chat_id, id, 4000).unwrap_or_default();
+        let state = if running { format!("Started in the background as process {id}.") } else { format!("Process {id} already ended (exit code {}).", code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".into())) };
+        let body = if text.trim().is_empty() { " No output yet.".to_string() } else { format!(" Its output so far:\n{}", text.trim_end()) };
+        let detail = json!({ "shell": which.name(), "process": id, "output": text });
+        return (files::Outcome { text: format!("{state}{body}\nRead more or stop it with processes."), error: !running && code != Some(0), detail: Some(detail) }, false);
+    }
+    let name = which.name();
+    let (f, out, cancelled) = shell::wait(run, timeout, token, |tail| tick(json!({ "shell": name, "output": tail }))).await;
+    let out = out.lock().unwrap();
+    let (text, error) = shell::report(&f, &out, timeout);
+    let detail = json!({ "shell": name, "output": out.tail(16_000), "exit": f.code, "timedOut": f.timed_out });
+    (files::Outcome { text, error, detail: Some(detail) }, cancelled)
+}
+
+/// The processes tool.
+pub fn processes(ctx: &Ctx, args: &Value) -> files::Outcome {
+    let procs = shell::Processes::global();
+    let id = args.get("id").and_then(Value::as_u64).map(|n| n as u32);
+    let ok = |t: String| files::Outcome { text: t, error: false, detail: None };
+    let fail = |t: String| files::Outcome { text: t, error: true, detail: None };
+    match (str_arg(args, "action"), id) {
+        ("list", _) | ("", None) => {
+            let list = procs.list(&ctx.chat_id);
+            if list.is_empty() {
+                return ok("No background processes.".into());
+            }
+            let rows: Vec<String> = list
+                .iter()
+                .map(|p| {
+                    let state = if p.running { "running".to_string() } else { format!("ended (exit code {})", p.code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".into())) };
+                    format!("{} · {} · {state} · {}", p.id, p.shell, p.command)
+                })
+                .collect();
+            ok(rows.join("\n"))
+        }
+        ("read", Some(id)) => {
+            let max = args.get("lines").and_then(Value::as_u64).unwrap_or(4000).clamp(100, 30_000) as usize;
+            match procs.read(&ctx.chat_id, id, max) {
+                Some((text, running, code, secs)) => {
+                    let state = if running { format!("Process {id}, running for {secs:.0} s.") } else { format!("Process {id}, ended (exit code {}).", code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".into())) };
+                    ok(if text.trim().is_empty() { format!("{state} No output.") } else { format!("{state} Recent output:\n{}", text.trim_end()) })
+                }
+                None => fail(format!("There's no process {id} in this session.")),
+            }
+        }
+        ("stop", Some(id)) => {
+            if procs.stop(&ctx.chat_id, id) {
+                ok(format!("Stopped process {id}."))
+            } else {
+                fail(format!("There's no process {id} in this session."))
+            }
+        }
+        (_, None) => fail("Give the process's id.".into()),
+        (other, _) => fail(format!("Unknown action {other}: use list, read or stop.")),
+    }
 }
 
 /// Runs an agent tool: its answer, whether it failed, and its card's detail.

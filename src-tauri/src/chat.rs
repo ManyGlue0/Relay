@@ -548,7 +548,7 @@ fn tool_specs(core: &Core, agent: bool, skills: &[Skill], web: bool, mcp: bool) 
     let mut specs = Vec::new();
     let mut routes = HashMap::new();
     if agent {
-        for (tool, description, schema) in crate::agent::tool_specs() {
+        for (tool, description, schema) in crate::agent::tool_specs(core.prefs.get().agent_cmd) {
             let alias = crate::mcp::tool_alias(crate::agent::SERVER, tool);
             specs.push(json!({
                 "type": "function",
@@ -1185,9 +1185,29 @@ impl Job {
             }
         }
         let t0 = Instant::now();
-        let res = tokio::select! {
-            r = crate::agent::call(ctx, tool, args) => Some(r),
-            _ = self.token.cancelled() => None,
+        let res = if let Some(which) = crate::agent::shell::Shell::of_tool(tool) {
+            // The card shows the output as it comes.
+            let env: crate::agent::shell::Env = Vec::new();
+            let base = saved.clone();
+            let (out, cancelled) = crate::agent::run_command(ctx, which, args, &env, &self.token, |live| {
+                let mut d = base.clone();
+                if let (Some(d), Some(l)) = (d.as_object_mut(), live.as_object()) {
+                    for (k, v) in l {
+                        d.insert(k.clone(), v.clone());
+                    }
+                }
+                set_detail(part, Some(d));
+                tr.set_tool(part.clone());
+            })
+            .await;
+            (!cancelled).then_some(out)
+        } else if tool == "processes" {
+            Some(crate::agent::processes(ctx, args))
+        } else {
+            tokio::select! {
+                r = crate::agent::call(ctx, tool, args) => Some(r),
+                _ = self.token.cancelled() => None,
+            }
         };
         let ms = Some(t0.elapsed().as_millis() as u64);
         let Some(out) = res else {

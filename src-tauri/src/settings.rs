@@ -71,6 +71,8 @@ pub struct Settings {
     pub checkpoint_file_mb: u64,
     /// The checkpoint store's soft budget per folder (GB).
     pub checkpoint_budget_gb: u64,
+    /// Agent sessions get a cmd.exe tool too (off: PowerShell, and Bash where installed).
+    pub agent_cmd: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -165,6 +167,7 @@ impl Default for Settings {
             agent_mode: "ask".into(),
             checkpoint_file_mb: 50,
             checkpoint_budget_gb: 2,
+            agent_cmd: false,
         }
     }
 }

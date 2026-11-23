@@ -773,6 +773,7 @@ pub fn chat_delete(
     delete_checkpoints: Option<bool>,
 ) -> Result<(), String> {
     core.streams.stop_chat(&id);
+    agent::shell::Processes::global().stop_all(&id);
     let files = core.db.attachment_ids(Some(&id))?;
     let summary = core.db.chat_summary(&id)?;
     core.db.delete_chat(&id)?;
@@ -970,6 +971,17 @@ pub async fn agent_restore(core: CoreState<'_>, chat_id: String, checkpoint: i64
         agent::checkpoints::restore(&agent::checkpoints::Store::of(core), &chat_id, &folder, checkpoint)
     })
     .await
+}
+
+/// A session's background processes.
+#[tauri::command]
+pub fn agent_processes(chat_id: String) -> Vec<agent::shell::ProcessView> {
+    agent::shell::Processes::global().list(&chat_id)
+}
+
+#[tauri::command]
+pub fn agent_process_stop(chat_id: String, id: u32) -> bool {
+    agent::shell::Processes::global().stop(&chat_id, id)
 }
 
 /// A session's checkpoints (which steps can still be restored).

@@ -1,13 +1,13 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AnimatePresence, motion } from "framer-motion";
-import { Bot, Copy as RestoreIcon, FileStack, FolderClosed, GitBranch, MessageCircle, Minus, PanelLeft, Square, X } from "lucide-react";
-import { useId } from "react";
-import { api, type ChatKind } from "../lib/api";
+import { Activity, Bot, Copy as RestoreIcon, FileStack, FolderClosed, GitBranch, MessageCircle, Minus, PanelLeft, Square, X } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
+import { api, type ChatKind, type ProcessView } from "../lib/api";
 import { folderName, useFolderInfo } from "../lib/folder";
 import { spring } from "../lib/motion";
 import { useStore, useView } from "../lib/store";
 import { SECTIONS } from "./Sidebar";
-import { IconButton, Pill } from "./ui";
+import { IconButton, MenuItem, Pill, Popover, anchorFrom, type Anchor } from "./ui";
 
 /** The collapsed sidebar's width: its icons sit on the same column as the open sidebar's. */
 export const RAIL = 54;
@@ -40,6 +40,7 @@ export function TitleBar({ sidebarWidth }: { sidebarWidth: number }) {
         <span data-tauri-drag-region>{title}</span>
         {!settingsOpen && <SessionMeta />}
       </div>
+      {!settingsOpen && <ProcessesChip />}
       {!settingsOpen && <FilesToggle />}
       <div className="caption">
         <button className="caption-btn" aria-label="Minimize" onClick={() => void getCurrentWindow().minimize()}>
@@ -73,6 +74,58 @@ function SessionMeta() {
         </>
       )}
     </span>
+  );
+}
+
+/** The session's background processes, with Stop (shown while there are any). */
+function ProcessesChip() {
+  const chatId = useStore((s) => (s.current && s.current.id === s.currentId && s.current.kind === "agent" ? s.current.id : null));
+  const busy = useStore((s) => (chatId ? !!s.streaming[chatId] : false));
+  const [list, setList] = useState<ProcessView[]>([]);
+  const [anchor, setAnchor] = useState<Anchor | null>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!chatId) return setList([]);
+    let live = true;
+    const load = () => void api.processes(chatId).then((l) => live && setList(l)).catch(() => {});
+    load();
+    const t = setInterval(load, anchor || busy ? 1500 : 4000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [chatId, anchor, busy]);
+  const running = list.filter((p) => p.running);
+  if (!chatId || running.length === 0) return null;
+  return (
+    <>
+      <button ref={btn} className={`chip proc-chip ${anchor ? "open" : ""}`} title="Background processes" onClick={() => (anchor ? setAnchor(null) : setAnchor(anchorFrom(btn.current!, { alignRight: true })))}>
+        <Activity size={14} className="chip-icon" />
+        <span className="chip-label">{running.length === 1 ? "1 running" : `${running.length} running`}</span>
+      </button>
+      <Popover anchor={anchor} onClose={() => setAnchor(null)} width={320} trigger={btn}>
+        <div className="menu">
+          {list.map((p) => (
+            <MenuItem
+              key={p.id}
+              icon={<Activity size={15} />}
+              disabled={!p.running}
+              trailing={p.running ? "Stop" : p.code != null ? `Exit ${p.code}` : "Ended"}
+              onSelect={() => {
+                void api.stopProcess(chatId, p.id).then(() => api.processes(chatId).then(setList));
+              }}
+            >
+              <span className="menu-two">
+                <span className="mono-label">{p.command}</span>
+                <span className="menu-sub">
+                  {p.shell} · process {p.id}
+                </span>
+              </span>
+            </MenuItem>
+          ))}
+        </div>
+      </Popover>
+    </>
   );
 }
 

@@ -287,6 +287,22 @@ export interface ToolDetail {
   checkpoint?: number;
   /** Why no checkpoint could be taken. */
   unprotected?: string;
+  /** Commands: the shell, the output's end (live while it runs), how it ended. */
+  shell?: string;
+  output?: string;
+  exit?: number | null;
+  timedOut?: boolean;
+  /** A command left running in the background. */
+  process?: number;
+}
+
+export interface ProcessView {
+  id: number;
+  command: string;
+  shell: string;
+  started: number;
+  running: boolean;
+  code: number | null;
 }
 
 export interface Checkpoint {
@@ -532,6 +548,8 @@ export const api = {
   /** Reads the folder's AGENTS.md / CLAUDE.md again; returns how long it is (0: none). */
   reloadInstructions: (chatId: string) => invoke<number>("agent_reload_instructions", { chatId }),
   checkpoints: (chatId: string) => invoke<Checkpoint[]>("agent_checkpoints", { chatId }),
+  processes: (chatId: string) => invoke<ProcessView[]>("agent_processes", { chatId }),
+  stopProcess: (chatId: string, id: number) => invoke<boolean>("agent_process_stop", { chatId, id }),
   restore: (chatId: string, checkpoint: number) => invoke<Restored>("agent_restore", { chatId, checkpoint }),
   sessionChanges: (chatId: string) => invoke<Changes>("agent_changes", { chatId }),
   fileVersions: (chatId: string, path: string) => invoke<FileVersion[]>("agent_file_versions", { chatId, path }),

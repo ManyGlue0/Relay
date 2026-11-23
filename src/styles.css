@@ -1520,6 +1520,39 @@ body.resizing .titlebar-title {
   margin-right: 6px;
 }
 
+/* Commands: the line asked about, and the output terminal style. */
+.cmd-line {
+  margin: 0 10px 8px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: var(--code-bg);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.terminal {
+  margin: 0 10px 10px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: #16161a;
+  color: #d8d8de;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.proc-chip {
+  margin-right: 4px;
+  height: 28px;
+}
+
 /* An Agent session's permission mode. */
 .mode-chip {
   gap: 5px;

@@ -298,6 +298,7 @@ pub fn run() {
             commands::chat_search,
             commands::agent_folder_info,
             commands::agent_open_folder,
+            commands::tool_answer,
             commands::agent_processes,
             commands::agent_process_stop,
             commands::agent_restore,

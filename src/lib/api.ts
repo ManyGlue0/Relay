@@ -261,7 +261,21 @@ export interface MessageStats {
 
 export type MessageStatus = "done" | "streaming" | "stopped" | "error";
 
-export type ToolStatus = "approval" | "running" | "done" | "error" | "denied" | "blocked";
+export type ToolStatus = "approval" | "question" | "running" | "done" | "error" | "denied" | "blocked";
+
+/** A question the model asks (agent__ask_user). */
+export interface Question {
+  question: string;
+  header: string;
+  options: { label: string; description: string }[];
+  multiple: boolean;
+}
+
+/** One answer: the labels picked, and anything typed under "Other". */
+export interface Answer {
+  picked: string[];
+  other: string;
+}
 
 /** One diff line: "+" | "-" | " ", its old and new line numbers, its text. */
 export type DiffRow = [string, number | null, number | null, string];
@@ -294,6 +308,11 @@ export interface ToolDetail {
   timedOut?: boolean;
   /** A command left running in the background. */
   process?: number;
+  /** agent__ask_user: the questions, and the answers once given (null: closed). */
+  questions?: Question[];
+  answers?: Answer[] | null;
+  /** agent__todo: the list. */
+  items?: { text: string; status: "pending" | "in_progress" | "done" }[];
 }
 
 export interface ProcessView {
@@ -549,6 +568,8 @@ export const api = {
   reloadInstructions: (chatId: string) => invoke<number>("agent_reload_instructions", { chatId }),
   checkpoints: (chatId: string) => invoke<Checkpoint[]>("agent_checkpoints", { chatId }),
   processes: (chatId: string) => invoke<ProcessView[]>("agent_processes", { chatId }),
+  /** Answers to the model's questions (null: closed without answering). */
+  answerTool: (messageId: string, callId: string, answers: Answer[] | null) => invoke<void>("tool_answer", { messageId, callId, answers }),
   stopProcess: (chatId: string, id: number) => invoke<boolean>("agent_process_stop", { chatId, id }),
   restore: (chatId: string, checkpoint: number) => invoke<Restored>("agent_restore", { chatId, checkpoint }),
   sessionChanges: (chatId: string) => invoke<Changes>("agent_changes", { chatId }),

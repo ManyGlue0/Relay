@@ -122,13 +122,15 @@ function AssistantMessage({ message, busy }: { message: Message; busy: boolean }
   const last = useStore((s) => s.current?.leafId === message.id);
   const unfinished = message.status === "stopped" || message.status === "error" || message.stats?.finishReason === "length";
   const canContinue = last && unfinished && (parts.length > 0 || !!message.content);
+  // Only the newest to-do list of a reply shows whole.
+  const lastTodo = parts.reduce((n, p, i) => (p.type === "tool" && p.tool === "todo" ? i : n), -1);
   return (
     <div className={`msg msg-assistant ${streaming ? "streaming" : ""}`}>
       {parts.map((p, i) => {
         const last = i === parts.length - 1;
         if (p.type === "reasoning") return <Reasoning key={i} text={p.text} live={streaming && last && !!message.thinking} ms={p.ms ?? null} />;
         if (p.type === "text") return <Markdown key={i} text={p.text} streaming={streaming && last} />;
-        return <ToolCard key={p.id} part={p} messageId={message.id} />;
+        return <ToolCard key={p.id} part={p} messageId={message.id} stale={p.tool === "todo" && i < lastTodo} />;
       })}
       {waiting && <Waiting />}
       {message.status === "error" && (
@@ -329,8 +331,8 @@ function toolFace(part: ToolPart): { icon: React.ReactNode; name: string; server
   }
 }
 
-function ToolCard({ part, messageId }: { part: ToolPart; messageId: string }) {
-  if (part.serverId === AGENT_SERVER) return <AgentToolCard part={part} messageId={messageId} />;
+function ToolCard({ part, messageId, stale }: { part: ToolPart; messageId: string; stale?: boolean }) {
+  if (part.serverId === AGENT_SERVER) return <AgentToolCard part={part} messageId={messageId} stale={stale} />;
   return <OtherToolCard part={part} messageId={messageId} />;
 }
 

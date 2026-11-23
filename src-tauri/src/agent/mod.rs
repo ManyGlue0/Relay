@@ -109,6 +109,126 @@ pub fn tool_specs(cmd: bool) -> Vec<(&'static str, String, Value)> {
     out
 }
 
+/// Asking the user and the to-do list: in Agent sessions (asking only where
+/// someone is there to answer: not in Auto or Bypass) and in chats with tools on.
+pub fn interact_specs(ask: bool) -> Vec<(&'static str, String, Value)> {
+    let mut out = Vec::new();
+    if ask {
+        out.push((
+            "ask_user",
+            "Asks the user one to four questions, each with two to four options to pick from (they can also write their own answer), and waits for the answers. \
+Use it when you need a decision only they can make (a choice between approaches, a missing detail), not for things you can find out yourself."
+                .to_string(),
+            json!({ "type": "object", "properties": {
+                "questions": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "type": "object", "properties": {
+                    "question": { "type": "string", "description": "The question, ending with a question mark." },
+                    "header": { "type": "string", "description": "A short label for it (a word or two)." },
+                    "options": { "type": "array", "minItems": 2, "maxItems": 4, "items": { "type": "object", "properties": {
+                        "label": { "type": "string", "description": "The choice, in a few words." },
+                        "description": { "type": "string", "description": "What picking it means." }
+                    }, "required": ["label"] } },
+                    "multiple": { "type": "boolean", "description": "More than one option may be picked." }
+                }, "required": ["question", "options"] } }
+            }, "required": ["questions"] }),
+        ));
+    }
+    out.push((
+        "todo",
+        "Writes your to-do list for the task, shown to the user: the whole list each time, each item pending, in_progress or done. \
+Use it for work with several steps: write it at the start, and update it as you finish steps (one item in_progress at a time)."
+            .to_string(),
+        json!({ "type": "object", "properties": {
+            "items": { "type": "array", "items": { "type": "object", "properties": {
+                "text": { "type": "string" },
+                "status": { "type": "string", "enum": ["pending", "in_progress", "done"] }
+            }, "required": ["text", "status"] } }
+        }, "required": ["items"] }),
+    ));
+    out
+}
+
+/// The questions as the card shows them: at most 4, each with 2 to 4 options.
+pub fn questions(args: &Value) -> Result<Value, String> {
+    let list = args.get("questions").and_then(Value::as_array).ok_or("Give the questions")?;
+    let mut out = Vec::new();
+    for q in list.iter().take(4) {
+        let question = q.get("question").and_then(Value::as_str).unwrap_or("").trim();
+        if question.is_empty() {
+            continue;
+        }
+        let options: Vec<Value> = q
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|o| {
+                o.iter()
+                    .filter_map(|x| {
+                        let label = x.get("label").and_then(Value::as_str).or_else(|| x.as_str())?.trim();
+                        (!label.is_empty()).then(|| json!({ "label": label, "description": x.get("description").and_then(Value::as_str).unwrap_or("") }))
+                    })
+                    .take(4)
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.push(json!({
+            "question": question,
+            "header": q.get("header").and_then(Value::as_str).unwrap_or(""),
+            "options": options,
+            "multiple": q.get("multiple").and_then(Value::as_bool).unwrap_or(false),
+        }));
+    }
+    if out.is_empty() {
+        return Err("Give at least one question".into());
+    }
+    Ok(json!(out))
+}
+
+/// The user's answers as the model reads them. `answers` is a list (one
+/// per question) of the picked labels and any text of their own; None: they
+/// didn't answer.
+pub fn answers_text(questions: &Value, answers: Option<&Value>) -> String {
+    let Some(answers) = answers.and_then(Value::as_array) else {
+        return "The user closed the questions without answering. Carry on with your best judgment, and say what you assumed.".into();
+    };
+    let mut out = String::from("The user answered:");
+    for (i, q) in questions.as_array().into_iter().flatten().enumerate() {
+        let a = answers.get(i);
+        let picked: Vec<String> = a.and_then(|a| a.get("picked")).and_then(Value::as_array).map(|p| p.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+        let other = a.and_then(|a| a.get("other")).and_then(Value::as_str).unwrap_or("").trim().to_string();
+        let mut parts = picked;
+        if !other.is_empty() {
+            parts.push(format!("\"{other}\" (in their own words)"));
+        }
+        let answer = if parts.is_empty() { "(no answer)".to_string() } else { parts.join("; ") };
+        out.push_str(&format!("\n{}. {} → {}", i + 1, q.get("question").and_then(Value::as_str).unwrap_or(""), answer));
+    }
+    out
+}
+
+/// The to-do tool: the whole list, checked.
+pub fn todo(args: &Value) -> files::Outcome {
+    let items: Vec<Value> = args
+        .get("items")
+        .and_then(Value::as_array)
+        .map(|l| {
+            l.iter()
+                .take(50)
+                .filter_map(|x| {
+                    let text = x.get("text").and_then(Value::as_str)?.trim();
+                    let status = match x.get("status").and_then(Value::as_str) {
+                        Some("done") => "done",
+                        Some("in_progress") => "in_progress",
+                        _ => "pending",
+                    };
+                    (!text.is_empty()).then(|| json!({ "text": text, "status": status }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let left = items.iter().filter(|i| i["status"] != "done").count();
+    let text = if items.is_empty() { "The to-do list is empty.".to_string() } else if left == 0 { format!("To-do list updated: all {} done.", items.len()) } else { format!("To-do list updated: {left} of {} left.", items.len()) };
+    files::Outcome { text, error: false, detail: Some(json!({ "items": items })) }
+}
+
 fn file_specs() -> Vec<(&'static str, &'static str, Value)> {
     let path = |what: &str| json!({ "type": "string", "description": what });
     vec![
@@ -171,8 +291,8 @@ fn file_specs() -> Vec<(&'static str, &'static str, Value)> {
 pub fn prompt(folder: &str, mode: &str, instructions: Option<&str>) -> String {
     let rules = match mode {
         "edits" => "File changes in the folder run right away; commands and anything outside the folder wait for the user's OK.",
-        "auto" => "Auto mode: nothing waits for the user. Steps the rules don't allow are refused with a reason: don't try another way to do the same thing, carry on with the rest, and list what was blocked at the end.",
-        "bypass" => "Bypass mode: your tool calls run without asking. Be careful: nothing stops a mistake (every change in the folder can still be undone by the user).",
+        "auto" => "Auto mode: the user isn't watching and nothing waits for them. Steps the rules don't allow are refused with a reason: don't try another way to do the same thing, carry on with the rest. Don't stop to ask questions: decide sensibly, and at the end list what was blocked, the questions you'd have asked and the assumptions you made.",
+        "bypass" => "Bypass mode: your tool calls run without asking. Be careful: nothing stops a mistake (every change in the folder can still be undone by the user). Don't stop to ask questions: decide sensibly, and at the end list the questions you'd have asked and the assumptions you made.",
         _ => "Each change and command waits for the user's OK. If they decline, ask what they'd like instead or carry on with something else.",
     };
     let mut out = format!(
@@ -599,6 +719,25 @@ mod tests {
         assert_eq!(verdict("auto", "read_file", "~/.ssh/id_rsa"), "refuse");
         assert_eq!(verdict("bypass", "read_file", "~/.aws/credentials"), "refuse");
         assert_eq!(mode_of(Some("weird")), "ask");
+    }
+
+    #[test]
+    fn questions_answers_and_todos() {
+        let q = questions(&json!({ "questions": [
+            { "question": "Which database?", "options": [{ "label": "SQLite" }, { "label": "Postgres", "description": "a server" }, "Files"] },
+            { "question": "", "options": [] }
+        ] }))
+        .unwrap();
+        assert_eq!(q.as_array().unwrap().len(), 1);
+        assert_eq!(q[0]["options"][2]["label"], "Files");
+        let a = json!([{ "picked": ["Postgres"], "other": "with pgvector" }]);
+        let text = answers_text(&q, Some(&a));
+        assert!(text.contains("Which database? → Postgres; \"with pgvector\""), "{text}");
+        assert!(answers_text(&q, None).contains("without answering"));
+        assert!(questions(&json!({ "questions": [] })).is_err());
+        let t = todo(&json!({ "items": [{ "text": "a", "status": "done" }, { "text": "b", "status": "weird" }, { "text": " " }] }));
+        assert_eq!(t.text, "To-do list updated: 1 of 2 left.");
+        assert_eq!(t.detail.unwrap()["items"][1]["status"], "pending");
     }
 
     #[test]

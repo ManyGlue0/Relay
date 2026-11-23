@@ -1,7 +1,12 @@
 import { motion } from "framer-motion";
 import {
   Activity,
+  Check,
   ChevronRight,
+  Circle,
+  CircleDot,
+  ListTodo,
+  MessageCircleQuestion,
   CircleAlert,
   CircleCheck,
   CircleSlash,
@@ -18,7 +23,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { DiffRow, Part, ToolDecision, ToolDetail } from "../lib/api";
+import { api, errorText, type Answer, type DiffRow, type Part, type Question, type ToolDecision, type ToolDetail } from "../lib/api";
 import { spring } from "../lib/motion";
 import { useStore } from "../lib/store";
 import { seconds } from "../lib/time";
@@ -87,7 +92,13 @@ const EDITS = new Set(["write_file", "edit_file", "delete_path"]);
 
 const SHELLS = new Set(["powershell", "bash", "cmd"]);
 
-export function AgentToolCard({ part, messageId }: { part: ToolPart; messageId: string }) {
+export function AgentToolCard({ part, messageId, stale }: { part: ToolPart; messageId: string; stale?: boolean }) {
+  if (part.tool === "ask_user") return <QuestionCard part={part} messageId={messageId} />;
+  if (part.tool === "todo") return <TodoCard part={part} stale={!!stale} />;
+  return <StepCard part={part} messageId={messageId} />;
+}
+
+function StepCard({ part, messageId }: { part: ToolPart; messageId: string }) {
   const [open, setOpen] = useState(false);
   const detail: ToolDetail = part.detail ?? {};
   const f = face(part, detail);
@@ -163,6 +174,137 @@ export function AgentToolCard({ part, messageId }: { part: ToolPart; messageId: 
           {part.result == null && <pre className="tool-args">{part.arguments}</pre>}
         </div>
       )}
+    </div>
+  );
+}
+
+/** The model's questions: pick options (or write your own), then send. */
+function QuestionCard({ part, messageId }: { part: ToolPart; messageId: string }) {
+  const qs: Question[] = part.detail?.questions ?? [];
+  const asking = part.status === "question";
+  const [answers, setAnswers] = useState<Answer[]>(() => qs.map(() => ({ picked: [], other: "" })));
+  const [sending, setSending] = useState(false);
+  const given = part.detail?.answers;
+  const send = async (value: Answer[] | null) => {
+    setSending(true);
+    try {
+      await api.answerTool(messageId, part.id, value);
+    } catch (e) {
+      useStore.getState().toast(errorText(e));
+    } finally {
+      setSending(false);
+    }
+  };
+  const toggle = (i: number, label: string, multiple: boolean) =>
+    setAnswers((all) =>
+      all.map((a, j) => {
+        if (j !== i) return a;
+        const on = a.picked.includes(label);
+        if (multiple) return { ...a, picked: on ? a.picked.filter((x) => x !== label) : [...a.picked, label] };
+        return { ...a, picked: on ? [] : [label] };
+      }),
+    );
+  const ready = answers.some((a) => a.picked.length > 0 || a.other.trim());
+  return (
+    <div className={`tool-card question-card ${asking ? "approval" : ""}`}>
+      <div className="question-head">
+        <span className="tool-well">
+          <MessageCircleQuestion size={13} />
+        </span>
+        <span className="tool-verb">{asking ? (qs.length === 1 ? "A question for you" : `${qs.length} questions for you`) : "Asked you"}</span>
+      </div>
+      {qs.map((q, i) => (
+        <div key={i} className="question">
+          <div className="question-text">
+            {q.header && <span className="question-tag">{q.header}</span>}
+            {q.question}
+          </div>
+          {asking ? (
+            <>
+              <div className="question-options">
+                {q.options.map((o) => {
+                  const on = answers[i]?.picked.includes(o.label);
+                  return (
+                    <button key={o.label} className={`question-option ${on ? "on" : ""}`} onClick={() => toggle(i, o.label, q.multiple)} aria-pressed={on}>
+                      <span className={`question-mark ${q.multiple ? "qm-box" : "qm-dot"}`}>{on && <Check size={11} strokeWidth={3} />}</span>
+                      <span className="question-option-text">
+                        <span className="question-label">{o.label}</span>
+                        {o.description && <span className="question-desc">{o.description}</span>}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <input
+                className="question-other"
+                placeholder="Other: write your own answer"
+                value={answers[i]?.other ?? ""}
+                onChange={(e) => setAnswers((all) => all.map((a, j) => (j === i ? { ...a, other: e.target.value } : a)))}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && ready && !sending) void send(answers);
+                }}
+              />
+            </>
+          ) : (
+            <div className="question-answer">{answerText(given?.[i]) ?? (given === null ? "Not answered" : part.status === "denied" ? "Stopped" : "…")}</div>
+          )}
+        </div>
+      ))}
+      {asking && (
+        <div className="tool-ask-bar question-bar">
+          <span className="tool-ask-text">{qs.some((q) => q.multiple) ? "Pick one or more, or write your own" : "Pick one, or write your own"}</span>
+          <Button variant="ghost" disabled={sending} onClick={() => void send(null)}>
+            Skip
+          </Button>
+          <Button variant="primary" disabled={!ready || sending} onClick={() => void send(answers)}>
+            Send answers
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function answerText(a: Answer | undefined): string | null {
+  if (!a) return null;
+  const parts = [...a.picked, ...(a.other.trim() ? [`“${a.other.trim()}”`] : [])];
+  return parts.length ? parts.join(", ") : "No answer";
+}
+
+/** The model's to-do list. Earlier versions in the same reply fold to one line. */
+function TodoCard({ part, stale }: { part: ToolPart; stale: boolean }) {
+  const items = part.detail?.items ?? [];
+  const done = items.filter((i) => i.status === "done").length;
+  if (stale) {
+    return (
+      <div className="todo-line">
+        <ListTodo size={13} />
+        <span>
+          Updated the to-do list · {done}/{items.length}
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="tool-card todo-card">
+      <div className="question-head">
+        <span className="tool-well">
+          <ListTodo size={13} />
+        </span>
+        <span className="tool-verb">To-do</span>
+        <span className="tool-fill" />
+        <span className="todo-count">
+          {done}/{items.length}
+        </span>
+      </div>
+      <ul className="todo-list">
+        {items.map((it, i) => (
+          <li key={i} className={`todo-item ${it.status}`}>
+            {it.status === "done" ? <CircleCheck size={14} /> : it.status === "in_progress" ? <CircleDot size={14} /> : <Circle size={14} />}
+            <span>{it.text}</span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

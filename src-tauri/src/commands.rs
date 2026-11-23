@@ -973,6 +973,19 @@ pub async fn agent_restore(core: CoreState<'_>, chat_id: String, checkpoint: i64
     .await
 }
 
+/// The user's answers to the model's questions (agent__ask_user): a JSON
+/// list, one entry per question (`{picked: [labels], other: text}`), or null
+/// when they closed the questions.
+#[tauri::command]
+pub fn tool_answer(core: CoreState, message_id: String, call_id: String, answers: Value) -> Result<(), String> {
+    let text = if answers.is_array() { answers.to_string() } else { "null".into() };
+    if core.streams.decide(&message_id, &call_id, &text) {
+        Ok(())
+    } else {
+        Err("Those questions aren't waiting anymore".into())
+    }
+}
+
 /// A session's background processes.
 #[tauri::command]
 pub fn agent_processes(chat_id: String) -> Vec<agent::shell::ProcessView> {

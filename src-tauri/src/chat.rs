@@ -544,11 +544,20 @@ struct ToolRoute {
 /// skills), then every tool of the ready MCP servers that isn't off.
 /// The tools a chat offers, in a fixed order (skills, Relay's web tools, then
 /// MCP servers in their Settings order): each switch adds its own.
-fn tool_specs(core: &Core, agent: bool, skills: &[Skill], web: bool, mcp: bool) -> (Vec<Value>, HashMap<String, ToolRoute>) {
+/// `agent`: an Agent session's mode (its tools come first); in a chat, asking
+/// the user and the to-do list come with the MCP switch.
+fn tool_specs(core: &Core, agent: Option<&str>, skills: &[Skill], web: bool, mcp: bool) -> (Vec<Value>, HashMap<String, ToolRoute>) {
     let mut specs = Vec::new();
     let mut routes = HashMap::new();
-    if agent {
-        for (tool, description, schema) in crate::agent::tool_specs(core.prefs.get().agent_cmd) {
+    let mut own: Vec<(&'static str, String, Value)> = Vec::new();
+    if agent.is_some() {
+        own.extend(crate::agent::tool_specs(core.prefs.get().agent_cmd));
+    }
+    if agent.is_some() || mcp {
+        own.extend(crate::agent::interact_specs(!matches!(agent, Some("auto" | "bypass"))));
+    }
+    {
+        for (tool, description, schema) in own {
             let alias = crate::mcp::tool_alias(crate::agent::SERVER, tool);
             specs.push(json!({
                 "type": "function",
@@ -669,7 +678,8 @@ fn prepare(core: &Core, chat: &crate::db::Chat, history: &[Message], provider_id
     } else {
         None
     };
-    let (specs, routes) = tool_specs(core, agent.is_some(), &skills, chat.summary.web && !hosted_web, chat.summary.tools);
+    let mode = agent.as_ref().map(|ctx| ctx.mode(core));
+    let (specs, routes) = tool_specs(core, mode, &skills, chat.summary.web && !hosted_web, chat.summary.tools);
 
     let mut messages: Vec<Value> = Vec::new();
     let mut system = system_prompt(core, preset.as_ref(), &chat.system_prompt);
@@ -778,7 +788,7 @@ enum Pickup {
 /// A tool call that never finished: stopped while it waited for the user or ran.
 fn unfinished_tool(p: &Part) -> bool {
     matches!(p, Part::Tool { status, result, .. }
-        if matches!(status.as_str(), "approval" | "running" | "denied") || (status == "error" && result.as_deref() == Some("Stopped")))
+        if matches!(status.as_str(), "approval" | "question" | "running" | "denied") || (status == "error" && result.as_deref() == Some("Stopped")))
 }
 
 /// Trims a reply that didn't finish to where it can go on: tool calls that
@@ -1121,6 +1131,45 @@ impl Job {
     /// run. Returns what goes back to the model, or None when the reply was
     /// stopped meanwhile.
     async fn run_agent_tool(&self, core: &Core, tr: &mut Tracker, part: &mut Part, tool: &str, args: &Value) -> Option<String> {
+        // Asking and the to-do list work in chats too.
+        if tool == "todo" {
+            let out = crate::agent::todo(args);
+            set_detail(part, out.detail);
+            set_tool_state(part, "done", Some(out.text.clone()), None);
+            tr.set_tool(part.clone());
+            return Some(out.text);
+        }
+        if tool == "ask_user" {
+            let questions = match crate::agent::questions(args) {
+                Ok(q) => q,
+                Err(e) => {
+                    set_tool_state(part, "error", Some(e.clone()), None);
+                    tr.set_tool(part.clone());
+                    return Some(e);
+                }
+            };
+            set_detail(part, Some(json!({ "questions": questions })));
+            set_tool_state(part, "question", None, None);
+            tr.set_tool(part.clone());
+            let t0 = Instant::now();
+            let answer = match core.streams.wait_for(&self.message_id, part_id(part)) {
+                Some(rx) => tokio::select! {
+                    d = rx => d.ok(),
+                    _ = self.token.cancelled() => {
+                        set_tool_state(part, "denied", None, None);
+                        tr.set_tool(part.clone());
+                        return None;
+                    }
+                },
+                None => None,
+            };
+            let answers: Option<Value> = answer.as_deref().and_then(|a| serde_json::from_str(a).ok()).filter(Value::is_array);
+            let text = crate::agent::answers_text(&questions, answers.as_ref());
+            set_detail(part, Some(json!({ "questions": questions, "answers": answers })));
+            set_tool_state(part, "done", Some(text.clone()), Some(t0.elapsed().as_millis() as u64));
+            tr.set_tool(part.clone());
+            return Some(text);
+        }
         let Some(ctx) = self.agent.as_ref() else {
             set_tool_state(part, "error", Some("Agent tools only work in Agent sessions.".into()), None);
             tr.set_tool(part.clone());

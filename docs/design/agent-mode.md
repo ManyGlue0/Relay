@@ -1,6 +1,6 @@
 # Agent mode
 
-Status: **being built** (steps 1 to 4 of the build order are done). Target: Relay 0.7.0. Written 2026-11-23 from a
+Status: **being built** (steps 1 to 5 of the build order are done). Target: Relay 0.7.0. Written 2026-11-23 from a
 question-and-answer design session with Andrea and two review rounds; the first
 six open questions were answered the same day. What's still open is listed at
 the end.
@@ -438,7 +438,8 @@ Each step ends in something Andrea can test on its own.
 4. **Shell tools** (built): PowerShell (+ Bash when installed, CMD as a
    setting), job object, time limits, folded command cards, background
    processes; Accept edits and Bypass modes (their chip came in step 2).
-5. **AskUserQuestion and the to-do list** (also in Chat).
+5. **AskUserQuestion and the to-do list** (built; in chats they come with the
+   MCP switch).
 6. **Auto mode, rules:** the path map, the PowerShell parser and the Bash/cmd
    tokenizers, the rule table, refusals, blocked list, secrets, the workspace
    venv. A test suite of commands that must be refused and must be allowed.

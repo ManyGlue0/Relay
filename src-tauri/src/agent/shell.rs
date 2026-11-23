@@ -212,10 +212,11 @@ fn command_for(shell: Shell, command: &str) -> Result<tokio::process::Command, S
         Shell::PowerShell => {
             use base64::Engine;
             let (exe, _) = powershell();
-            // UTF-8 out, no progress bars; the exit code of the last native
-            // command, or 1 when a cmdlet failed.
+            // UTF-8 out (without a BOM: Windows PowerShell's [Encoding]::UTF8
+            // puts one before text piped into programs), no progress bars; the
+            // exit code of the last native command, or 1 when a cmdlet failed.
             let script = format!(
-                "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n$OutputEncoding = [System.Text.Encoding]::UTF8\n{command}\nif ($LASTEXITCODE) {{ exit $LASTEXITCODE }} elseif (-not $?) {{ exit 1 }}"
+                "$ProgressPreference = 'SilentlyContinue'\n$OutputEncoding = [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false\n{command}\nif ($LASTEXITCODE) {{ exit $LASTEXITCODE }} elseif (-not $?) {{ exit 1 }}"
             );
             let utf16: Vec<u8> = script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
             let mut c = tokio::process::Command::new(exe);
@@ -488,6 +489,16 @@ mod tests {
         assert!(text.contains("hi True"), "{text}");
         assert_eq!(f.code, Some(3), "{text}");
         assert!(failed);
+    }
+
+    #[tokio::test]
+    async fn piping_into_programs_adds_no_bom() {
+        let dir = std::env::temp_dir();
+        let run = start(Shell::PowerShell, "'World' | findstr W", &dir, &Vec::new()).unwrap();
+        let token = CancellationToken::new();
+        let (_, out, _) = wait(run, Duration::from_secs(60), &token, |_| {}).await;
+        let text = out.lock().unwrap().tail(100);
+        assert_eq!(text.trim(), "World", "{text:?}");
     }
 
     #[tokio::test]

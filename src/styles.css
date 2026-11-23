@@ -1520,6 +1520,162 @@ body.resizing .titlebar-title {
   margin-right: 6px;
 }
 
+/* The model's questions. */
+.question-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 10px 0 8px;
+}
+.question {
+  padding: 2px 12px 10px;
+}
+.question + .question {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.question-text {
+  margin-bottom: 8px;
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+.question-tag {
+  display: inline-block;
+  margin-right: 7px;
+  padding: 1px 7px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  vertical-align: 1px;
+  color: var(--accent-ink);
+  background: var(--accent-bg);
+}
+.question-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.question-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 7px 9px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  text-align: left;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.question-option:hover {
+  background: var(--hover);
+}
+.question-option.on {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: var(--accent-soft);
+}
+.question-mark {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  border: 1.5px solid var(--border-strong);
+  color: #fff;
+}
+.question-mark.qm-dot {
+  border-radius: 50%;
+}
+.question-mark.qm-box {
+  border-radius: 4px;
+}
+.question-option.on .question-mark {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.question-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.question-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+.question-desc {
+  font-size: 12px;
+  color: var(--text-3);
+}
+.question-other {
+  width: 100%;
+  height: 32px;
+  margin-top: 6px;
+  padding: 0 10px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: transparent;
+  font-size: 13px;
+}
+.question-other:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+.question-answer {
+  font-size: 13px;
+  color: var(--text-2);
+}
+.question-bar {
+  padding: 0 12px 10px;
+  margin-top: 0;
+}
+
+/* The model's to-do list. */
+.todo-count {
+  font-size: 12px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.todo-list {
+  margin: 0;
+  padding: 0 12px 10px;
+  list-style: none;
+}
+.todo-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.todo-item svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--text-3);
+}
+.todo-item.in_progress svg {
+  color: var(--accent);
+}
+.todo-item.in_progress span {
+  font-weight: 500;
+}
+.todo-item.done svg {
+  color: var(--ok);
+}
+.todo-item.done span {
+  color: var(--text-3);
+  text-decoration: line-through;
+}
+.todo-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
 /* Commands: the line asked about, and the output terminal style. */
 .cmd-line {
   margin: 0 10px 8px;

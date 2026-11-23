@@ -301,6 +301,35 @@ CREATE VIRTUAL TABLE messages_fts USING fts5(
 /// v7: Agent sessions are chats with a kind, a folder (`folder_owned`: a
 /// workspace Relay made), a permission mode, the instructions read from the
 /// folder at the start, and the list of what Auto mode refused.
+/// v8: Agent sessions' checkpoints. A checkpoint is the state of a folder's
+/// protected files just before a step; each row is one file by content hash
+/// (the contents live on disk, stored once each). `folder` is the store's id.
+/// `restorable` 0: collapsed by pruning (the rows stay as per-file history).
+const SCHEMA_V8: &str = r#"
+CREATE TABLE checkpoints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id TEXT NOT NULL,
+    folder TEXT NOT NULL,
+    message_id TEXT,
+    call_id TEXT,
+    label TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    restorable INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX checkpoints_folder ON checkpoints(folder, id);
+CREATE INDEX checkpoints_chat ON checkpoints(chat_id, id);
+CREATE TABLE checkpoint_files (
+    checkpoint_id INTEGER NOT NULL REFERENCES checkpoints(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    mtime INTEGER NOT NULL,
+    PRIMARY KEY (checkpoint_id, path)
+);
+CREATE INDEX checkpoint_files_path ON checkpoint_files(path);
+CREATE INDEX checkpoint_files_hash ON checkpoint_files(hash);
+"#;
+
 const SCHEMA_V7: &str = r#"
 ALTER TABLE chats ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat';
 ALTER TABLE chats ADD COLUMN folder TEXT;
@@ -467,6 +496,54 @@ pub fn fts_query(input: &str) -> Option<String> {
     Some(words.into_iter().enumerate().map(|(i, w)| if i + 1 == n { format!("{w}*") } else { w }).collect::<Vec<_>>().join(" "))
 }
 
+/// One file in a checkpoint: its path in the folder ("/"-separated), content
+/// hash, size and modified time (ms).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FileRow {
+    pub path: String,
+    pub hash: String,
+    pub size: u64,
+    pub mtime: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Checkpoint {
+    pub id: i64,
+    pub chat_id: String,
+    pub folder: String,
+    pub message_id: Option<String>,
+    pub call_id: Option<String>,
+    pub label: String,
+    pub created_at: i64,
+    pub restorable: bool,
+}
+
+const CHECKPOINT_COLS: &str = "id, chat_id, folder, message_id, call_id, label, created_at, restorable";
+
+fn checkpoint_from(r: &Row) -> rusqlite::Result<Checkpoint> {
+    Ok(Checkpoint {
+        id: r.get(0)?,
+        chat_id: r.get(1)?,
+        folder: r.get(2)?,
+        message_id: r.get(3)?,
+        call_id: r.get(4)?,
+        label: r.get(5)?,
+        created_at: r.get(6)?,
+        restorable: r.get::<_, i64>(7)? != 0,
+    })
+}
+
+/// A version of a file in a folder's store.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Version {
+    pub hash: String,
+    pub size: u64,
+    pub at: i64,
+    pub checkpoint: i64,
+}
+
 /// Settings for a chat that aren't its messages.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -559,6 +636,9 @@ impl Db {
         }
         if version < 7 {
             conn.execute_batch(&format!("BEGIN; {SCHEMA_V7} PRAGMA user_version = 7; COMMIT;"))?;
+        }
+        if version < 8 {
+            conn.execute_batch(&format!("BEGIN; {SCHEMA_V8} PRAGMA user_version = 8; COMMIT;"))?;
         }
         // A reply that was streaming when Relay closed will never finish.
         conn.execute("UPDATE messages SET status = 'stopped' WHERE status = 'streaming'", [])?;
@@ -1077,6 +1157,166 @@ impl Db {
             }
             Ok(out)
         })
+    }
+
+    // ---- checkpoints ------------------------------------------------------------------------
+
+    /// The newest checkpoint of a folder's store, with its files.
+    pub fn checkpoint_last(&self, folder: &str) -> Result<Option<(i64, Vec<FileRow>)>, String> {
+        let id: Option<i64> =
+            self.with(|c| c.query_row("SELECT id FROM checkpoints WHERE folder = ?1 AND restorable = 1 ORDER BY id DESC LIMIT 1", [folder], |r| r.get(0)).optional())?;
+        match id {
+            Some(id) => Ok(Some((id, self.checkpoint_files(id)?))),
+            None => Ok(None),
+        }
+    }
+
+    pub fn checkpoint_files(&self, id: i64) -> Result<Vec<FileRow>, String> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT path, hash, size, mtime FROM checkpoint_files WHERE checkpoint_id = ?1")?;
+            let rows = st.query_map([id], |r| Ok(FileRow { path: r.get(0)?, hash: r.get(1)?, size: r.get::<_, i64>(2)? as u64, mtime: r.get(3)? }))?;
+            rows.collect()
+        })
+    }
+
+    pub fn checkpoint_insert(&self, chat_id: &str, folder: &str, message_id: &str, call_id: &str, label: &str, files: &[FileRow]) -> Result<i64, String> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO checkpoints (chat_id, folder, message_id, call_id, label, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![chat_id, folder, message_id, call_id, label, now_ms()],
+        )
+        .map_err(|e| e.to_string())?;
+        let id = tx.last_insert_rowid();
+        {
+            let mut st = tx
+                .prepare("INSERT INTO checkpoint_files (checkpoint_id, path, hash, size, mtime) VALUES (?1, ?2, ?3, ?4, ?5)")
+                .map_err(|e| e.to_string())?;
+            for f in files {
+                st.execute(params![id, f.path, f.hash, f.size as i64, f.mtime]).map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(id)
+    }
+
+    pub fn checkpoint(&self, id: i64) -> Result<Option<Checkpoint>, String> {
+        self.with(|c| c.query_row(&format!("SELECT {CHECKPOINT_COLS} FROM checkpoints WHERE id = ?1"), [id], checkpoint_from).optional())
+    }
+
+    /// A session's checkpoints, oldest first.
+    pub fn checkpoints_of(&self, chat_id: &str) -> Result<Vec<Checkpoint>, String> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!("SELECT {CHECKPOINT_COLS} FROM checkpoints WHERE chat_id = ?1 ORDER BY id"))?;
+            let rows = st.query_map([chat_id], checkpoint_from)?;
+            rows.collect()
+        })
+    }
+
+    /// A folder's checkpoints, oldest first.
+    pub fn checkpoints_in(&self, folder: &str) -> Result<Vec<Checkpoint>, String> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!("SELECT {CHECKPOINT_COLS} FROM checkpoints WHERE folder = ?1 ORDER BY id"))?;
+            let rows = st.query_map([folder], checkpoint_from)?;
+            rows.collect()
+        })
+    }
+
+    /// A file's versions in a folder's store, oldest first: each distinct
+    /// content with the first checkpoint that held it.
+    pub fn file_versions(&self, folder: &str, path: &str) -> Result<Vec<Version>, String> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT f.hash, f.size, MIN(k.created_at), MIN(k.id) FROM checkpoint_files f JOIN checkpoints k ON k.id = f.checkpoint_id
+                 WHERE k.folder = ?1 AND f.path = ?2 GROUP BY f.hash ORDER BY MIN(k.id)",
+            )?;
+            let rows = st.query_map([folder, path], |r| {
+                Ok(Version { hash: r.get(0)?, size: r.get::<_, i64>(1)? as u64, at: r.get(2)?, checkpoint: r.get(3)? })
+            })?;
+            rows.collect()
+        })
+    }
+
+    /// The bytes a folder's store holds (each content once).
+    pub fn checkpoint_store_size(&self, folder: &str) -> Result<u64, String> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COALESCE(SUM(size), 0) FROM (SELECT f.hash, MAX(f.size) AS size FROM checkpoint_files f
+                 JOIN checkpoints k ON k.id = f.checkpoint_id WHERE k.folder = ?1 GROUP BY f.hash)",
+                [folder],
+                |r| r.get::<_, i64>(0),
+            )
+        })
+        .map(|n| n.max(0) as u64)
+    }
+
+    /// Marks checkpoints as no longer restorable (their rows stay, as history).
+    pub fn checkpoints_collapse(&self, ids: &[i64]) -> Result<(), String> {
+        self.with(|c| {
+            for id in ids {
+                c.execute("UPDATE checkpoints SET restorable = 0 WHERE id = ?1", [id])?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Drops collapsed checkpoints' rows past each file's newest `keep`
+    /// versions, and collapsed checkpoints left with no rows.
+    pub fn checkpoints_trim(&self, folder: &str, keep: usize) -> Result<(), String> {
+        self.with(|c| {
+            // Rank each (path, hash) by its newest appearance; rows of a version
+            // ranked past `keep` go, unless a restorable checkpoint holds them.
+            c.execute(
+                "DELETE FROM checkpoint_files WHERE rowid IN (
+                    SELECT f.rowid FROM checkpoint_files f JOIN checkpoints k ON k.id = f.checkpoint_id
+                    JOIN (
+                        SELECT path, hash, ROW_NUMBER() OVER (PARTITION BY path ORDER BY MAX(k2.id) DESC) AS rank
+                        FROM checkpoint_files f2 JOIN checkpoints k2 ON k2.id = f2.checkpoint_id
+                        WHERE k2.folder = ?1 GROUP BY path, hash
+                    ) v ON v.path = f.path AND v.hash = f.hash
+                    WHERE k.folder = ?1 AND k.restorable = 0 AND v.rank > ?2
+                 )",
+                params![folder, keep as i64],
+            )?;
+            // Of the versions kept, one row each is enough in collapsed checkpoints.
+            c.execute(
+                "DELETE FROM checkpoint_files WHERE rowid IN (
+                    SELECT f.rowid FROM checkpoint_files f JOIN checkpoints k ON k.id = f.checkpoint_id
+                    WHERE k.folder = ?1 AND k.restorable = 0 AND EXISTS (
+                        SELECT 1 FROM checkpoint_files g JOIN checkpoints j ON j.id = g.checkpoint_id
+                        WHERE j.folder = ?1 AND g.path = f.path AND g.hash = f.hash AND g.checkpoint_id < f.checkpoint_id
+                    )
+                 )",
+                [folder],
+            )?;
+            c.execute(
+                "DELETE FROM checkpoints WHERE folder = ?1 AND restorable = 0 AND NOT EXISTS (SELECT 1 FROM checkpoint_files f WHERE f.checkpoint_id = checkpoints.id)",
+                [folder],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Every content hash a folder's store still needs.
+    pub fn checkpoint_hashes(&self, folder: &str) -> Result<HashSet<String>, String> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT DISTINCT f.hash FROM checkpoint_files f JOIN checkpoints k ON k.id = f.checkpoint_id WHERE k.folder = ?1")?;
+            let rows = st.query_map([folder], |r| r.get(0))?;
+            rows.collect()
+        })
+    }
+
+    /// Folder stores a session's checkpoints are in.
+    pub fn checkpoint_folders_of(&self, chat_id: &str) -> Result<Vec<String>, String> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT DISTINCT folder FROM checkpoints WHERE chat_id = ?1")?;
+            let rows = st.query_map([chat_id], |r| r.get(0))?;
+            rows.collect()
+        })
+    }
+
+    pub fn delete_checkpoints_of(&self, chat_id: &str) -> Result<(), String> {
+        self.with(|c| c.execute("DELETE FROM checkpoints WHERE chat_id = ?1", [chat_id]).map(|_| ()))
     }
 
     // ---- search -----------------------------------------------------------------------------

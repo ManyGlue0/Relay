@@ -4,6 +4,7 @@ import { flushSync } from "react-dom";
 import { api, on, type ChatSummary, type McpStatus, type Message, type StreamDelta } from "./lib/api";
 import { handleEscape, useDark, useStore } from "./lib/store";
 import { ChatView } from "./components/ChatView";
+import { FilesPanel } from "./components/FilesPanel";
 import { SettingsPage } from "./components/settings/SettingsPage";
 import { Sidebar } from "./components/Sidebar";
 import { RAIL, TitleBar } from "./components/TitleBar";
@@ -145,7 +146,16 @@ export default function App() {
           </div>
           {sidebarOpen && <Resizer width={width} onChange={setWidth} onResizing={setResizing} />}
         </div>
-        <main className="pane">{settingsOpen ? <SettingsPage /> : <ChatView />}</main>
+        <main className="pane">
+          {settingsOpen ? (
+            <SettingsPage />
+          ) : (
+            <div className="pane-row">
+              <ChatView />
+              <FilesPanel />
+            </div>
+          )}
+        </main>
       </div>
       <Toasts />
     </div>

@@ -765,11 +765,22 @@ pub fn chat_archive(app: AppHandle, core: CoreState, id: String, archived: bool)
 }
 
 #[tauri::command]
-pub fn chat_delete(app: AppHandle, core: CoreState, id: String, delete_folder: Option<bool>) -> Result<(), String> {
+pub fn chat_delete(
+    app: AppHandle,
+    core: CoreState,
+    id: String,
+    delete_folder: Option<bool>,
+    delete_checkpoints: Option<bool>,
+) -> Result<(), String> {
     core.streams.stop_chat(&id);
     let files = core.db.attachment_ids(Some(&id))?;
     let summary = core.db.chat_summary(&id)?;
     core.db.delete_chat(&id)?;
+    // A session's checkpoints go when the user said so (with its workspace,
+    // always); kept, they stay as the folder's file history.
+    if delete_checkpoints == Some(true) || delete_folder == Some(true) {
+        let _ = agent::checkpoints::forget_session(&agent::checkpoints::Store::of(&core), &id);
+    }
     // A workspace Relay made goes too when the user said so; a folder they
     // picked never does.
     if let (Some(chat), Some(true)) = (summary, delete_folder) {
@@ -928,6 +939,104 @@ pub fn chat_search(core: CoreState, query: String, kind: Option<String>) -> Resu
 #[tauri::command]
 pub fn agent_folder_info(path: String) -> agent::FolderInfo {
     agent::folder_info(std::path::Path::new(&path))
+}
+
+/// A session's folder, as the checkpoint store knows it.
+fn session_folder(core: &Core, chat_id: &str) -> Result<std::path::PathBuf, String> {
+    let chat = core.db.chat_summary(chat_id)?.ok_or("That session no longer exists")?;
+    let folder = chat.folder.ok_or("This session has no folder yet")?;
+    Ok(agent::paths::real(std::path::Path::new(&folder)))
+}
+
+/// Runs checkpoint work off the main thread.
+async fn blocking<T: Send + 'static>(core: &Arc<Core>, f: impl FnOnce(&Core) -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    let core = core.clone();
+    tokio::task::spawn_blocking(move || f(&core)).await.map_err(|e| e.to_string())?
+}
+
+fn not_while_working(core: &Core, chat_id: &str) -> Result<(), String> {
+    if core.streams.active_chats().iter().any(|c| c == chat_id) {
+        return Err("Wait for the reply to finish (or stop it) first".into());
+    }
+    Ok(())
+}
+
+/// Makes the session's folder match a checkpoint (undoable).
+#[tauri::command]
+pub async fn agent_restore(core: CoreState<'_>, chat_id: String, checkpoint: i64) -> Result<agent::checkpoints::Restored, String> {
+    not_while_working(&core, &chat_id)?;
+    blocking(core.inner(), move |core| {
+        let folder = session_folder(core, &chat_id)?;
+        agent::checkpoints::restore(&agent::checkpoints::Store::of(core), &chat_id, &folder, checkpoint)
+    })
+    .await
+}
+
+/// A session's checkpoints (which steps can still be restored).
+#[tauri::command]
+pub fn agent_checkpoints(core: CoreState, chat_id: String) -> Result<Vec<db::Checkpoint>, String> {
+    core.db.checkpoints_of(&chat_id)
+}
+
+/// What the session changed in its folder (the files panel).
+#[tauri::command]
+pub async fn agent_changes(core: CoreState<'_>, chat_id: String) -> Result<agent::checkpoints::Changes, String> {
+    blocking(core.inner(), move |core| {
+        let folder = session_folder(core, &chat_id)?;
+        agent::checkpoints::changes(&agent::checkpoints::Store::of(core), &chat_id, &folder)
+    })
+    .await
+}
+
+/// A file's versions in the checkpoint store.
+#[tauri::command]
+pub fn agent_file_versions(core: CoreState, chat_id: String, path: String) -> Result<Vec<db::Version>, String> {
+    let folder = session_folder(&core, &chat_id)?;
+    core.db.file_versions(&agent::checkpoints::folder_id(&folder), &path)
+}
+
+/// One version of a file against the file now.
+#[tauri::command]
+pub async fn agent_version_diff(core: CoreState<'_>, chat_id: String, path: String, hash: String) -> Result<Value, String> {
+    blocking(core.inner(), move |core| {
+        let folder = session_folder(core, &chat_id)?;
+        let st = agent::checkpoints::Store::of(core);
+        let old = agent::checkpoints::read_version(&st, &folder, &hash)?;
+        let old = agent::files::decode(&old).ok_or("That version isn't text")?;
+        let now = std::fs::read(folder.join(&path)).ok().and_then(|b| agent::files::decode(&b)).unwrap_or_default();
+        Ok(agent::diff::lines(&old.replace("\r\n", "\n"), &now.replace("\r\n", "\n")))
+    })
+    .await
+}
+
+/// Writes one version of a file back (undoable: returns the checkpoint taken first).
+#[tauri::command]
+pub async fn agent_restore_file(core: CoreState<'_>, chat_id: String, path: String, hash: String) -> Result<i64, String> {
+    not_while_working(&core, &chat_id)?;
+    blocking(core.inner(), move |core| {
+        let folder = session_folder(core, &chat_id)?;
+        agent::checkpoints::restore_file(&agent::checkpoints::Store::of(core), &chat_id, &folder, &path, &hash)
+    })
+    .await
+}
+
+/// Opens a file of the session's folder in its app (a script or program is
+/// shown in its folder instead).
+#[tauri::command]
+pub fn agent_open_file(app: AppHandle, core: CoreState, chat_id: String, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let folder = session_folder(&core, &chat_id)?;
+    let full = agent::paths::normalize(&folder.join(&path));
+    if !agent::paths::within(&full, &folder) {
+        return Err("That file isn't in the session's folder".into());
+    }
+    if !full.exists() {
+        return Err("That file no longer exists".into());
+    }
+    if attachments::runs_when_opened(&path) {
+        return app.opener().reveal_item_in_dir(&full).map_err(|e| e.to_string());
+    }
+    app.opener().open_path(full.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
 }
 
 /// Reads a session's AGENTS.md / CLAUDE.md again (they're read once when it

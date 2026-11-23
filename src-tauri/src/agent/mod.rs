@@ -2,6 +2,7 @@
 //! by the user or a workspace Relay makes (`<data>\workspaces\<session id>`).
 //! See docs/design/agent-mode.md.
 
+pub mod checkpoints;
 pub mod diff;
 pub mod files;
 pub mod paths;
@@ -256,6 +257,21 @@ pub fn judge(ctx: &Ctx, mode: &str, tool: &str, args: &Value) -> Verdict {
         (_, _) if outside => Verdict::Ask(Some(format!("{shown} is outside the session's folder."))),
         _ => Verdict::Ask(None),
     }
+}
+
+/// Tools that change things: a checkpoint is taken before each.
+pub fn is_step(tool: &str) -> bool {
+    matches!(tool, "write_file" | "edit_file" | "delete_path" | "powershell" | "bash" | "cmd")
+}
+
+/// Records the folder before a step. Returns the checkpoint's id, or why
+/// there's none (the folder is too big, the store can't be written).
+pub async fn checkpoint(core: &std::sync::Arc<Core>, ctx: &Ctx, message_id: &str, call_id: &str, label: &str) -> Result<i64, String> {
+    let core = core.clone();
+    let (chat, folder, m, c, l) = (ctx.chat_id.clone(), ctx.folder.clone(), message_id.to_string(), call_id.to_string(), label.to_string());
+    tokio::task::spawn_blocking(move || checkpoints::take(&checkpoints::Store::of(&core), &chat, &folder, &m, &c, &l))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// What a call would change, for its approval card.

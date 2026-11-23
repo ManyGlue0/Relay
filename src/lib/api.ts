@@ -283,6 +283,42 @@ export interface ToolDetail {
   blocked?: { rule: string; why: string };
   folder?: boolean;
   files?: number;
+  /** The checkpoint taken before this step ("Restore to before this"). */
+  checkpoint?: number;
+  /** Why no checkpoint could be taken. */
+  unprotected?: string;
+}
+
+export interface Checkpoint {
+  id: number;
+  chatId: string;
+  label: string;
+  createdAt: number;
+  /** False: pruned to save space. */
+  restorable: boolean;
+}
+
+export interface Restored {
+  written: number;
+  removed: number;
+  /** Restoring to this undoes the restore. */
+  undo: number;
+}
+
+/** What a session changed in its folder. */
+export interface Changes {
+  files: { path: string; kind: "created" | "changed" | "deleted"; versions: number }[];
+  /** Files too big for checkpoints: [path, size]. */
+  big: [string, number][];
+  /** The session changed nothing yet. */
+  none: boolean;
+}
+
+export interface FileVersion {
+  hash: string;
+  size: number;
+  at: number;
+  checkpoint: number;
 }
 
 export type Part =
@@ -475,7 +511,7 @@ export const api = {
   pinChat: (id: string, pinned: boolean) => invoke<void>("chat_pin", { id, pinned }),
   archiveChat: (id: string, archived: boolean) => invoke<void>("chat_archive", { id, archived }),
   /** `deleteFolder`: also the workspace Relay made for an Agent session. */
-  deleteChat: (id: string, deleteFolder = false) => invoke<void>("chat_delete", { id, deleteFolder }),
+  deleteChat: (id: string, deleteFolder = false, deleteCheckpoints = false) => invoke<void>("chat_delete", { id, deleteFolder, deleteCheckpoints }),
   deleteAllChats: () => invoke<void>("chats_delete_all"),
   setChatModel: (id: string, providerId: string, model: string) => invoke<void>("chat_set_model", { id, providerId, model }),
   setChatOptions: (id: string, options: ChatOptions) => invoke<ChatSummary | null>("chat_set_options", { id, options }),
@@ -495,6 +531,13 @@ export const api = {
   openSessionFolder: (chatId: string) => invoke<void>("agent_open_folder", { chatId }),
   /** Reads the folder's AGENTS.md / CLAUDE.md again; returns how long it is (0: none). */
   reloadInstructions: (chatId: string) => invoke<number>("agent_reload_instructions", { chatId }),
+  checkpoints: (chatId: string) => invoke<Checkpoint[]>("agent_checkpoints", { chatId }),
+  restore: (chatId: string, checkpoint: number) => invoke<Restored>("agent_restore", { chatId, checkpoint }),
+  sessionChanges: (chatId: string) => invoke<Changes>("agent_changes", { chatId }),
+  fileVersions: (chatId: string, path: string) => invoke<FileVersion[]>("agent_file_versions", { chatId, path }),
+  versionDiff: (chatId: string, path: string, hash: string) => invoke<Diff>("agent_version_diff", { chatId, path, hash }),
+  restoreFile: (chatId: string, path: string, hash: string) => invoke<number>("agent_restore_file", { chatId, path, hash }),
+  openSessionFile: (chatId: string, path: string) => invoke<void>("agent_open_file", { chatId, path }),
   /** `days` null: all time. */
   usage: (days: number | null) => invoke<Usage>("usage_stats", { days }),
 

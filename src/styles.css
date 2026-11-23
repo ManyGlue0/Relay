@@ -1337,6 +1337,189 @@ body.resizing .titlebar-title {
   color: var(--text-3);
 }
 
+.tool-restore {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 8px 6px;
+}
+.tool-restore button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 7px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.tool-restore button:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+.tool-restore button:disabled {
+  opacity: 0.5;
+}
+.tool-restore.gone,
+.tool-unprotected {
+  padding: 0 12px 8px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.tool-restore.gone {
+  justify-content: flex-end;
+}
+
+/* The session's files: a panel beside the conversation. */
+.pane-row {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.pane-row > .chat-view {
+  min-width: 0;
+}
+.files-panel {
+  flex: none;
+  overflow: hidden;
+  border-left: 1px solid var(--border);
+}
+.files-inner {
+  width: 340px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.files-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 44px;
+  padding: 0 8px 0 16px;
+  border-bottom: 1px solid var(--border);
+}
+.files-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.files-fill {
+  flex: 1;
+}
+.files-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+.files-empty,
+.files-none {
+  padding: 16px 8px;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+.files-none {
+  padding: 6px 8px;
+}
+.files-row-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: 8px;
+  text-align: left;
+}
+.files-row-head:hover {
+  background: var(--hover);
+}
+.files-kind {
+  flex: none;
+}
+.files-row.created .files-kind {
+  color: var(--ok);
+}
+.files-row.changed .files-kind {
+  color: var(--accent);
+}
+.files-row.deleted .files-kind {
+  color: var(--danger);
+}
+.files-name {
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.files-dir,
+.files-path {
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.files-versions {
+  padding: 2px 0 8px 29px;
+}
+.files-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 7px;
+  margin-bottom: 2px;
+  border-radius: 7px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.files-action:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.files-version-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding-left: 7px;
+}
+.files-when {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.files-size {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.files-version .diff {
+  margin: 2px 0 8px;
+}
+.files-big {
+  margin-top: 12px;
+  padding: 8px;
+  border-top: 1px solid var(--border);
+}
+.files-big-head {
+  margin-bottom: 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-3);
+}
+.files-big-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+}
+.files-big-row .files-path {
+  flex: 1;
+}
+.titlebar-files {
+  margin-right: 6px;
+}
+
 /* An Agent session's permission mode. */
 .mode-chip {
   gap: 5px;
@@ -1597,6 +1780,26 @@ body.resizing .titlebar-title {
   background: var(--composer);
   box-shadow: var(--shadow-lift);
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+/* A narrow composer (the files panel is open): the folder and mode chips
+   keep only their icons, the context meter its ring. */
+.composer {
+  container-type: inline-size;
+}
+@container (max-width: 600px) {
+  .folder-chip .chip-label,
+  .mode-chip .chip-label,
+  .mode-chip .chip-caret,
+  .context-text {
+    display: none;
+  }
+  .folder-chip,
+  .mode-chip {
+    padding: 0 8px;
+  }
+  .folder-pick .folder-chip {
+    padding-right: 4px;
+  }
 }
 .composer:focus-within {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong));

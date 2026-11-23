@@ -276,8 +276,8 @@ function ChatRow({ chat }: { chat: ChatSummary }) {
   const streaming = useStore((s) => !!s.streaming[chat.id]);
   const [menu, setMenu] = useState<Anchor | null>(null);
   const [renaming, setRenaming] = useState(false);
-  /** Deleting: first the session, then (for a workspace Relay made) its files. */
-  const [confirming, setConfirming] = useState<false | "chat" | "workspace">(false);
+  /** Deleting: first the session, then its workspace (one Relay made) or its checkpoints. */
+  const [confirming, setConfirming] = useState<false | "chat" | "workspace" | "checkpoints">(false);
   const more = useRef<HTMLButtonElement>(null);
   const session = chat.kind === "agent";
 
@@ -296,13 +296,30 @@ function ChatRow({ chat }: { chat: ChatSummary }) {
       </motion.div>
     );
   }
+  if (confirming === "checkpoints") {
+    return (
+      <motion.div key="cp" layout className="chat-row confirm" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={rowSpring}>
+        <span className="confirm-text" title="Kept, they stay as the folder's file history">
+          Its checkpoints too?
+        </span>
+        <button className="confirm-yes" onClick={() => void useStore.getState().deleteChat(chat.id, false, true)}>
+          Delete
+        </button>
+        <button className="confirm-no" autoFocus title="Keep them as the folder's file history" onClick={() => void useStore.getState().deleteChat(chat.id, false, false)}>
+          Keep
+        </button>
+      </motion.div>
+    );
+  }
   if (confirming) {
     return (
       <motion.div layout className="chat-row confirm" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={rowSpring}>
         <span className="confirm-text">{session ? "Delete this session?" : "Delete this chat?"}</span>
         <button
           className="confirm-yes"
-          onClick={() => (session && chat.folderOwned && chat.folder ? setConfirming("workspace") : void useStore.getState().deleteChat(chat.id))}
+          onClick={() =>
+            session && chat.folderOwned && chat.folder ? setConfirming("workspace") : session && chat.folder ? setConfirming("checkpoints") : void useStore.getState().deleteChat(chat.id)
+          }
         >
           Delete
         </button>

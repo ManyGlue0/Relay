@@ -1,6 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AnimatePresence, motion } from "framer-motion";
-import { Bot, Copy as RestoreIcon, FolderClosed, GitBranch, MessageCircle, Minus, PanelLeft, Square, X } from "lucide-react";
+import { Bot, Copy as RestoreIcon, FileStack, FolderClosed, GitBranch, MessageCircle, Minus, PanelLeft, Square, X } from "lucide-react";
 import { useId } from "react";
 import { api, type ChatKind } from "../lib/api";
 import { folderName, useFolderInfo } from "../lib/folder";
@@ -40,6 +40,7 @@ export function TitleBar({ sidebarWidth }: { sidebarWidth: number }) {
         <span data-tauri-drag-region>{title}</span>
         {!settingsOpen && <SessionMeta />}
       </div>
+      {!settingsOpen && <FilesToggle />}
       <div className="caption">
         <button className="caption-btn" aria-label="Minimize" onClick={() => void getCurrentWindow().minimize()}>
           <Minus size={15} strokeWidth={1.6} />
@@ -72,6 +73,18 @@ function SessionMeta() {
         </>
       )}
     </span>
+  );
+}
+
+/** Opens the session's files panel. */
+function FilesToggle() {
+  const agent = useStore((s) => !!s.current && s.current.id === s.currentId && s.current.kind === "agent");
+  const open = useStore((s) => s.filesPanel);
+  if (!agent) return null;
+  return (
+    <IconButton label={open ? "Hide the session's files" : "The session's files: what it changed, with versions"} active={open} className="titlebar-files" onClick={() => useStore.setState({ filesPanel: !open })}>
+      <FileStack size={16} />
+    </IconButton>
   );
 }
 

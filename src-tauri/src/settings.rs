@@ -67,6 +67,10 @@ pub struct Settings {
     pub view: String,
     /// The permission mode a new Agent session starts with: the last one used.
     pub agent_mode: String,
+    /// Files bigger than this (MB) aren't protected by checkpoints.
+    pub checkpoint_file_mb: u64,
+    /// The checkpoint store's soft budget per folder (GB).
+    pub checkpoint_budget_gb: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -159,6 +163,8 @@ impl Default for Settings {
             chat_web: false,
             view: "chat".into(),
             agent_mode: "ask".into(),
+            checkpoint_file_mb: 50,
+            checkpoint_budget_gb: 2,
         }
     }
 }

@@ -10,6 +10,7 @@ import {
   FolderTree,
   Loader,
   OctagonX,
+  RotateCcw,
   Search,
   ShieldQuestion,
   Trash2,
@@ -132,12 +133,29 @@ export function AgentToolCard({ part, messageId }: { part: ToolPart; messageId: 
           </div>
         </div>
       )}
+      {detail.checkpoint != null && !asking && part.status !== "running" && part.status !== "denied" && <RestoreBar checkpoint={detail.checkpoint} />}
+      {detail.unprotected && !asking && <div className="tool-unprotected">Not undoable: {detail.unprotected}</div>}
       {open && !asking && (
         <div className="tool-body">
           {part.result != null && <pre className="tool-result">{part.result || "(empty)"}</pre>}
           {part.result == null && <pre className="tool-args">{part.arguments}</pre>}
         </div>
       )}
+    </div>
+  );
+}
+
+/** "Restore to before this": the folder as it was right before the step. */
+function RestoreBar({ checkpoint }: { checkpoint: number }) {
+  const gone = useStore((s) => !!s.collapsed[checkpoint]);
+  const busy = useStore((s) => (s.currentId ? !!s.streaming[s.currentId] : false));
+  if (gone) return <div className="tool-restore gone">No longer restorable (pruned to save space)</div>;
+  return (
+    <div className="tool-restore">
+      <button disabled={busy} title={busy ? "Wait for the reply to finish" : "Put the folder back as it was right before this step (you can undo it)"} onClick={() => void useStore.getState().restoreTo(checkpoint)}>
+        <RotateCcw size={12} />
+        Restore to before this
+      </button>
     </div>
   );
 }

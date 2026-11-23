@@ -87,6 +87,10 @@ interface State {
   caps: Record<string, ModelCaps | null>;
   /** Files in the composer, per chat ("new" for a new one), like the text drafts. */
   files: Record<string, DraftFile[]>;
+  /** The Agent session's files panel is open. */
+  filesPanel: boolean;
+  /** Checkpoints pruning made unrestorable, by id (for the step cards). */
+  collapsed: Record<number, true>;
 
   init(): Promise<void>;
   /** Asks every provider whether it's there; at most every few seconds. */
@@ -123,8 +127,12 @@ interface State {
   /** Asks a model whether it calls tools; `quiet` (automatic checks) shows no error. */
   checkTools(ref: ModelRef, quiet?: boolean): Promise<void>;
   setCap(ref: ModelRef, ability: Ability, on: boolean | null): Promise<void>;
-  /** `deleteFolder`: an Agent session's workspace goes too. */
-  deleteChat(id: string, deleteFolder?: boolean): Promise<void>;
+  /** `deleteFolder`: an Agent session's workspace goes too (and its checkpoints); `deleteCheckpoints`: only those. */
+  deleteChat(id: string, deleteFolder?: boolean, deleteCheckpoints?: boolean): Promise<void>;
+  /** Which of a session's steps can no longer be restored. */
+  refreshCheckpoints(chatId: string): Promise<void>;
+  /** Makes the session's folder match the checkpoint before a step (with Undo). */
+  restoreTo(checkpoint: number): Promise<void>;
   pickModel(ref: ModelRef): void;
   setOptions(opts: ChatOptions): void;
   applyDelta(d: StreamDelta): void;
@@ -178,6 +186,8 @@ export const useStore = create<State>((set, get) => ({
   online: {},
   caps: {},
   files: {},
+  filesPanel: false,
+  collapsed: {},
 
   async probeProviders() {
     const now = Date.now();
@@ -259,6 +269,7 @@ export const useStore = create<State>((set, get) => ({
       }
       set((s) => ({ current: chat, focusComposer: s.focusComposer + 1 }));
       if (get().windowActive) void api.holsterSeen(id);
+      if (chat.kind === "agent") void get().refreshCheckpoints(id);
     } catch (e) {
       get().toast(errorText(e));
     }
@@ -522,9 +533,39 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
-  async deleteChat(id, deleteFolder = false) {
+  async refreshCheckpoints(chatId) {
     try {
-      await api.deleteChat(id, deleteFolder);
+      const list = await api.checkpoints(chatId);
+      const gone = Object.fromEntries(list.filter((c) => !c.restorable).map((c) => [c.id, true] as const));
+      set((s) => ({ collapsed: { ...s.collapsed, ...gone } }));
+    } catch {
+      /* the cards just don't say */
+    }
+  },
+
+  async restoreTo(checkpoint) {
+    const st = get();
+    const chatId = st.current?.id;
+    if (!chatId) return;
+    try {
+      const r = await api.restore(chatId, checkpoint);
+      const what = [r.written && `${r.written} ${r.written === 1 ? "file" : "files"} back`, r.removed && `${r.removed} removed`].filter(Boolean).join(", ");
+      get().toast(what ? `Restored: ${what}` : "Already as it was", {
+        label: "Undo",
+        run: () =>
+          void api
+            .restore(chatId, r.undo)
+            .then(() => get().toast("Undone"))
+            .catch((e) => get().toast(errorText(e))),
+      });
+    } catch (e) {
+      get().toast(errorText(e));
+    }
+  },
+
+  async deleteChat(id, deleteFolder = false, deleteCheckpoints = false) {
+    try {
+      await api.deleteChat(id, deleteFolder, deleteCheckpoints);
       set((s) => {
         const streaming = { ...s.streaming };
         delete streaming[id];
@@ -626,6 +667,7 @@ export const useStore = create<State>((set, get) => ({
 
   applyEnd(msg) {
     ended[msg.id] = msg;
+    if (get().chats.find((c) => c.id === msg.chatId)?.kind === "agent") void get().refreshCheckpoints(msg.chatId);
     setTimeout(() => {
       if (ended[msg.id] === msg) delete ended[msg.id];
     }, 10_000);

@@ -201,6 +201,10 @@ fn core(app: &AppHandle) -> Arc<Core> {
     app.state::<Arc<Core>>().inner().clone()
 }
 
+fn core_arc(app: &AppHandle) -> Arc<Core> {
+    core(app)
+}
+
 /// The first message, shortened: the title until (or instead of) a generated one.
 pub fn provisional_title(text: &str) -> String {
     let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("New chat");
@@ -1171,6 +1175,15 @@ impl Job {
         }
         set_tool_state(part, "running", None, None);
         tr.set_tool(part.clone());
+        // Before a change, the folder is recorded: "Restore to before this".
+        let mut saved = json!({});
+        if crate::agent::is_step(tool) {
+            let label = format!("Before {tool}");
+            match crate::agent::checkpoint(&core_arc(&self.app), ctx, &self.message_id, part_id(part), &label).await {
+                Ok(id) => saved["checkpoint"] = json!(id),
+                Err(e) => saved["unprotected"] = json!(e),
+            }
+        }
         let t0 = Instant::now();
         let res = tokio::select! {
             r = crate::agent::call(ctx, tool, args) => Some(r),
@@ -1182,8 +1195,14 @@ impl Job {
             tr.set_tool(part.clone());
             return None;
         };
-        if out.detail.is_some() {
-            set_detail(part, out.detail);
+        let mut detail = out.detail.unwrap_or_else(|| json!({}));
+        if let (Some(d), Some(extra)) = (detail.as_object_mut(), saved.as_object()) {
+            for (k, v) in extra {
+                d.insert(k.clone(), v.clone());
+            }
+        }
+        if detail.as_object().is_some_and(|d| !d.is_empty()) {
+            set_detail(part, Some(detail));
         }
         set_tool_state(part, if out.error { "error" } else { "done" }, Some(out.text.clone()), ms);
         tr.set_tool(part.clone());

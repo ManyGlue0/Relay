@@ -1,6 +1,6 @@
 # Agent mode
 
-Status: **being built** (steps 1 to 7 of the build order are done). Target: Relay 0.7.0. Written 2026-11-23 from a
+Status: **being built** (steps 1 to 8 of the build order are done). Target: Relay 0.7.0. Written 2026-11-23 from a
 question-and-answer design session with Andrea and two review rounds; the first
 six open questions were answered the same day. What's still open is listed at
 the end.
@@ -454,7 +454,12 @@ Each step ends in something Andrea can test on its own.
    `-I`, `-E` or `-S`, or an interpreter whose probe fails, has its code read
    before it runs instead. The judge listens on loopback TCP with the
    session's token. The guard is installed in Auto only.)
-8. **Long sessions:** summarizing near the context limit.
+8. **Long sessions:** summarizing near the context limit. (Built: before a
+   message when the last reply's request and answer filled 85% of the
+   detected context, or mid-reply when a round's request does; mid-reply,
+   old tool outputs are dropped first. The summary is a part of the reply,
+   shown as the divider; another summary waits until the conversation has
+   grown halfway from there to the end of the context.)
 9. **Git and background:** branch, checkpoint commit, see all changes,
    notifications for approvals.
 

@@ -27,6 +27,7 @@ import { api, errorText, type Answer, type DiffRow, type Part, type Question, ty
 import { spring } from "../lib/motion";
 import { useStore } from "../lib/store";
 import { seconds } from "../lib/time";
+import { Markdown } from "./Markdown";
 import { Button } from "./ui";
 
 type ToolPart = Extract<Part, { type: "tool" }>;
@@ -95,7 +96,56 @@ const SHELLS = new Set(["powershell", "bash", "cmd"]);
 export function AgentToolCard({ part, messageId, stale }: { part: ToolPart; messageId: string; stale?: boolean }) {
   if (part.tool === "ask_user") return <QuestionCard part={part} messageId={messageId} />;
   if (part.tool === "todo") return <TodoCard part={part} stale={!!stale} />;
+  if (part.tool === "summarize") return <SummaryDivider part={part} />;
   return <StepCard part={part} messageId={messageId} />;
+}
+
+/** Where a long session was summarized to save context: everything above
+ *  stays on screen, the model goes on from the summary (open to read it). */
+function SummaryDivider({ part }: { part: ToolPart }) {
+  const [open, setOpen] = useState(false);
+  const summary = part.detail?.summary;
+  if (part.status === "running") {
+    return (
+      <div className="summary-divider">
+        <span className="summary-rule" />
+        <span className="summary-label">
+          <Loader size={13} className="spin" />
+          Summarizing the session to save context…
+        </span>
+        <span className="summary-rule" />
+      </div>
+    );
+  }
+  if (part.status !== "done" || !summary) {
+    return (
+      <div className="summary-divider failed" title={part.result ?? ""}>
+        <span className="summary-rule" />
+        <span className="summary-label">
+          <CircleAlert size={13} />
+          The session couldn't be summarized
+        </span>
+        <span className="summary-rule" />
+      </div>
+    );
+  }
+  return (
+    <div className="summary-block">
+      <button className="summary-divider" aria-expanded={open} title={open ? "Hide the summary" : "Read the summary the model goes on from"} onClick={() => setOpen(!open)}>
+        <span className="summary-rule" />
+        <span className="summary-label">
+          Summarized here
+          <ChevronRight size={13} className={`summary-caret ${open ? "open" : ""}`} />
+        </span>
+        <span className="summary-rule" />
+      </button>
+      {open && (
+        <div className="summary-text">
+          <Markdown text={summary} />
+        </div>
+      )}
+    </div>
+  );
 }
 
 function StepCard({ part, messageId }: { part: ToolPart; messageId: string }) {

@@ -4259,3 +4259,54 @@ body.resizing .titlebar-title {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Where a long session was summarized. */
+.summary-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin: 10px 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-2);
+}
+button.summary-divider {
+  cursor: pointer;
+}
+button.summary-divider:hover .summary-label {
+  color: var(--text);
+}
+.summary-divider.failed {
+  color: var(--warn);
+}
+.summary-rule {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.summary-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.summary-caret {
+  transition: transform 0.15s ease;
+}
+.summary-caret.open {
+  transform: rotate(90deg);
+}
+.summary-text {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--surface);
+  font-size: 13px;
+  line-height: 1.5;
+
+  color: var(--text);
+}

@@ -329,6 +329,9 @@ export interface ToolDetail {
   process?: number;
   /** agent__ask_user: the questions, and the answers once given (null: closed). */
   questions?: Question[];
+  /** A session's summary (the agent's `summarize` part). */
+  summary?: string;
+  keepUser?: boolean;
   answers?: Answer[] | null;
   /** agent__todo: the list. */
   items?: { text: string; status: "pending" | "in_progress" | "done" }[];

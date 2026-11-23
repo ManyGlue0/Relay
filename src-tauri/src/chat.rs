@@ -500,6 +500,23 @@ fn history_messages(history: &[Message], opts: History) -> Vec<Value> {
                     flush(&mut text, &mut thought, &mut calls, &mut results, &mut out, &mut round);
                     text.push_str(t);
                 }
+                // A summary: what came before goes, the summary takes its place.
+                Part::Tool { server_id, tool, status, detail, .. } if server_id == crate::agent::SERVER_ID && tool == "summarize" => {
+                    let summary = detail.as_ref().and_then(|d| d.get("summary")).and_then(Value::as_str).filter(|_| status == "done");
+                    if let Some(summary) = summary {
+                        flush(&mut text, &mut thought, &mut calls, &mut results, &mut out, &mut round);
+                        let keep = detail.as_ref().and_then(|d| d.get("keepUser")).and_then(Value::as_bool).unwrap_or(false);
+                        let kept = if keep { out.iter().rposition(|m| m["role"] == "user").map(|i| out.remove(i)) } else { None };
+                        out.clear();
+                        match kept {
+                            Some(mut u) => {
+                                prefix_user(&mut u, &summary_intro(summary, true));
+                                out.push(u);
+                            }
+                            None => out.push(json!({ "role": "user", "content": summary_intro(summary, false) })),
+                        }
+                    }
+                }
                 // The server's own tools ran inside its reply: no round of their own.
                 Part::Tool { server_id, tool, arguments, result, .. } if server_id == crate::anthropic::HOSTED => {
                     let clipped: String = result.clone().unwrap_or_default().chars().take(1000).collect();
@@ -638,7 +655,14 @@ struct Prepared {
     settings: crate::settings::Settings,
     /// An Agent session's folder and rules.
     agent: Option<crate::agent::Ctx>,
+    /// The model's context window, when known (Agent sessions summarize near it).
+    context: Option<u64>,
+    /// The conversation already fills most of the context: summarize before replying.
+    summarize_first: bool,
 }
+
+/// Agent sessions summarize when a request fills this much of the context.
+const SUMMARIZE_AT: f64 = 0.85;
 
 /// Tool rounds one reply may take in an Agent session (a chat's come from Settings).
 const AGENT_ROUNDS: u32 = 200;
@@ -732,7 +756,16 @@ fn prepare(core: &Core, chat: &crate::db::Chat, history: &[Message], provider_id
         body["_cache"] = json!(settings.anthropic_cache);
         body["_web"] = json!(chat.summary.web && hosted_web);
     }
-    Ok(Prepared { provider, body, messages, specs, routes, settings, agent })
+    let context = provider.contexts.get(model).copied().filter(|c| *c > 0);
+    // The last reply's request plus its answer: what the next request starts from.
+    let used = history.iter().rev().find(|m| m.role == "assistant" && m.stats.is_some()).and_then(|m| m.stats.as_ref()).map(|s| {
+        s.get("promptTokens").and_then(Value::as_u64).unwrap_or(0) + s.get("completionTokens").and_then(Value::as_u64).unwrap_or(0)
+    });
+    // Not again right after a summary that didn't bring it down (the system
+    // prompt and tools may fill most of a small context on their own).
+    let just_summarized = history.iter().rev().find(|m| m.role == "assistant").and_then(|m| m.parts.as_ref()).is_some_and(|p| p.to_string().contains("\"tool\":\"summarize\""));
+    let summarize_first = agent.is_some() && !just_summarized && matches!((used, context), (Some(u), Some(c)) if u as f64 >= SUMMARIZE_AT * c as f64);
+    Ok(Prepared { provider, body, messages, specs, routes, settings, agent, context, summarize_first })
 }
 
 pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &str, model: &str) -> Result<Message, String> {
@@ -765,6 +798,8 @@ pub fn start_reply(app: &AppHandle, chat_id: &str, parent: &str, provider_id: &s
         max_rounds,
         send_reasoning: p.settings.send_reasoning,
         agent: p.agent.clone(),
+        context: p.context,
+        summarize_first: p.summarize_first,
         title,
         first_user,
         token,
@@ -917,6 +952,8 @@ pub fn continue_reply(app: &AppHandle, chat_id: &str, message_id: &str) -> Resul
         max_rounds,
         send_reasoning: p.settings.send_reasoning,
         agent: p.agent.clone(),
+        context: p.context,
+        summarize_first: false,
         title: None,
         first_user: String::new(),
         token,
@@ -1005,6 +1042,8 @@ struct Job {
     resume: Option<Resume>,
     /// An Agent session's folder and rules.
     agent: Option<crate::agent::Ctx>,
+    context: Option<u64>,
+    summarize_first: bool,
 }
 
 /// What a continued reply starts from.
@@ -1126,7 +1165,175 @@ fn set_tool_state(part: &mut Part, status: &str, result: Option<String>, ms: Opt
     }
 }
 
+/// A whole answer without its inline thinking (`<think>…</think>`).
+fn strip_think(text: &str) -> String {
+    let mut split = ThinkSplitter::default();
+    let (mut content, _) = split.feed(text);
+    content.push_str(&split.finish().0);
+    content.trim().to_string()
+}
+
+/// What the model is asked when a session is summarized.
+const SUMMARY_REQUEST: &str = "Summarize this session so the work can continue from your summary alone, without the conversation. Include: the user's goals and requests (their exact words where they matter), decisions made and why, the files created, changed or deleted (paths) and what changed in each, commands that mattered and their results, problems met and how they were solved, the current state, and exactly what's left to do next. Don't repeat file contents: they can be read again. Plain text, short sections.";
+
+/// The summary as the model reads it, before the new message or in place of the conversation.
+fn summary_intro(summary: &str, before_new_message: bool) -> String {
+    let end = if before_new_message { "The user's new message follows." } else { "Carry on with the task from where you left off." };
+    format!("[This session was summarized to save context. The summary of the work so far:]\n\n{}\n\n[End of the summary. Files may have changed since: read them again before editing them. {end}]", summary.trim())
+}
+
+/// Puts text before a user message's content (a string or a list of parts).
+fn prefix_user(msg: &mut Value, text: &str) {
+    match msg.get_mut("content") {
+        Some(Value::String(c)) => *c = format!("{text}\n\n{c}"),
+        Some(Value::Array(parts)) => parts.insert(0, json!({ "type": "text", "text": text })),
+        _ => msg["content"] = json!(text),
+    }
+}
+
+/// Cuts long text to its start and end.
+fn clip_middle(text: &str, max: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max {
+        return text.to_string();
+    }
+    let head: String = chars[..max / 3].iter().collect();
+    let tail: String = chars[chars.len() - (max - max / 3)..].iter().collect();
+    format!("{head}\n[… {} characters cut …]\n{tail}", chars.len() - max)
+}
+
+/// The conversation as plain text for the summary: tool outputs cut short,
+/// files read not repeated, at most `max` characters (the start and the end kept).
+fn transcript(messages: &[Value], max: usize) -> String {
+    let mut names: HashMap<String, String> = HashMap::new();
+    let mut out = String::new();
+    let text_of = |c: &Value| -> String {
+        match c {
+            Value::String(s) => s.clone(),
+            Value::Array(parts) => parts
+                .iter()
+                .map(|p| match p.get("type").and_then(Value::as_str) {
+                    Some("text") => p.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
+                    Some(other) => format!("[{other}]"),
+                    None => String::new(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => String::new(),
+        }
+    };
+    for m in messages {
+        match m.get("role").and_then(Value::as_str) {
+            Some("user") => out.push_str(&format!("\n\nUSER:\n{}", text_of(&m["content"]))),
+            Some("assistant") => {
+                let text = text_of(&m["content"]);
+                if !text.trim().is_empty() {
+                    out.push_str(&format!("\n\nASSISTANT:\n{}", text.trim()));
+                }
+                for c in m.get("tool_calls").and_then(Value::as_array).into_iter().flatten() {
+                    let name = c.pointer("/function/name").and_then(Value::as_str).unwrap_or("").to_string();
+                    let args = c.pointer("/function/arguments").and_then(Value::as_str).unwrap_or("");
+                    out.push_str(&format!("\n\nTOOL CALL {name}: {}", clip_middle(args, 600)));
+                    if let Some(id) = c.get("id").and_then(Value::as_str) {
+                        names.insert(id.to_string(), name);
+                    }
+                }
+            }
+            Some("tool") => {
+                let name = m.get("tool_call_id").and_then(Value::as_str).and_then(|id| names.get(id)).cloned().unwrap_or_default();
+                let result = text_of(&m["content"]);
+                let shown = if name.ends_with("read_file") { "[the file's contents: omitted]".to_string() } else { clip_middle(&result, 1500) };
+                out.push_str(&format!("\n\nTOOL RESULT:\n{shown}"));
+            }
+            _ => {}
+        }
+    }
+    clip_middle(out.trim(), max)
+}
+
+/// Old tool outputs give way first when a reply nears the context's end
+/// (all but the last 6). Returns whether anything was dropped.
+fn drop_old_outputs(messages: &mut [Value]) -> bool {
+    let tools: Vec<usize> = messages.iter().enumerate().filter(|(_, m)| m["role"] == "tool").map(|(i, _)| i).collect();
+    let mut dropped = false;
+    for &i in tools.iter().take(tools.len().saturating_sub(6)) {
+        if messages[i]["content"].as_str().is_some_and(|c| c.len() > 300) {
+            messages[i]["content"] = json!("[Output dropped to save context: run the tool again if you need it.]");
+            dropped = true;
+        }
+    }
+    dropped
+}
+
 impl Job {
+    /// Summarizes the session (shown as a "Summarized here" part) and goes on
+    /// from the summary: before the new message (`keep_user`), or in place of
+    /// the whole conversation, mid-reply. On failure the messages stay as they were.
+    async fn summarize(&self, tr: &mut Tracker, messages: &mut Vec<Value>, keep_user: bool) {
+        let mut part = Part::Tool {
+            id: format!("summary_{}", crate::db::new_id()),
+            server_id: crate::agent::SERVER_ID.into(),
+            server: crate::agent::SERVER.into(),
+            tool: "summarize".into(),
+            arguments: "{}".into(),
+            status: "running".into(),
+            result: None,
+            ms: None,
+            detail: Some(json!({ "keepUser": keep_user })),
+        };
+        tr.set_tool(part.clone());
+        let t0 = Instant::now();
+        let system = messages.first().filter(|m| m["role"] == "system").cloned();
+        let mut input: Vec<Value> = messages.iter().filter(|m| m["role"] != "system").cloned().collect();
+        let kept = if keep_user && input.last().is_some_and(|m| m["role"] == "user") { input.pop() } else { None };
+        // About 3 characters a token, half the context for the transcript.
+        let max = (self.context.unwrap_or(32_000) as usize).saturating_mul(3) / 2;
+        let mut body = self.body.clone();
+        if let Some(o) = body.as_object_mut() {
+            o.remove("tools");
+        }
+        body["_web"] = json!(false);
+        body["messages"] = json!([
+            { "role": "system", "content": "You summarize work sessions between a user and a coding agent, so the agent can carry on from the summary." },
+            { "role": "user", "content": format!("The session so far:\n\n{}\n\n---\n\n{SUMMARY_REQUEST}", transcript(&input, max.max(8_000))) }
+        ]);
+        let res = tokio::select! {
+            r = crate::llm::complete(&self.api, &self.base, self.key.as_deref(), body) => Some(r),
+            _ = self.token.cancelled() => None,
+        };
+        let ms = Some(t0.elapsed().as_millis() as u64);
+        let summary = match res {
+            Some(Ok(text)) => {
+                let t = strip_think(&text);
+                if t.is_empty() {
+                    Err("The summary came back empty.".to_string())
+                } else {
+                    Ok(t)
+                }
+            }
+            Some(Err(e)) => Err(format!("Couldn't summarize the session: {e}")),
+            None => Err("Stopped".into()),
+        };
+        match summary {
+            Ok(summary) => {
+                let mut next = Vec::new();
+                next.extend(system);
+                match kept {
+                    Some(mut u) => {
+                        prefix_user(&mut u, &summary_intro(&summary, true));
+                        next.push(u);
+                    }
+                    None => next.push(json!({ "role": "user", "content": summary_intro(&summary, false) })),
+                }
+                *messages = next;
+                set_detail(&mut part, Some(json!({ "keepUser": keep_user, "summary": summary })));
+                set_tool_state(&mut part, "done", Some("Summarized the session so far.".into()), ms);
+            }
+            Err(e) => set_tool_state(&mut part, "error", Some(e), ms),
+        }
+        tr.set_tool(part);
+    }
+
     /// An agent tool call: judged by the session's mode, asked, refused or
     /// run. Returns what goes back to the model, or None when the reply was
     /// stopped meanwhile.
@@ -1373,7 +1580,43 @@ impl Job {
             started = Instant::now();
         }
 
+        // Near the context's end: summarize the session first, keeping the new message.
+        // After a summary, the next round's prompt is the new floor: another
+        // summary waits until the conversation has grown well past it.
+        let mut fresh = false;
+        let mut floor: Option<u64> = None;
+        if self.summarize_first && !self.token.is_cancelled() {
+            self.summarize(&mut tr, &mut messages, true).await;
+            fresh = true;
+        }
+        // Old tool outputs were dropped this reply (the step before summarizing).
+        let mut trimmed = false;
+        // The prompt size last acted on (each round's usage is checked once).
+        let mut checked: Option<u64> = None;
+
         'rounds: for round in 0..=self.max_rounds {
+            // A long reply nearing the context's end: old tool outputs go first,
+            // then the session is summarized and the reply carries on from that.
+            if round > 0 && self.agent.is_some() {
+                if let (Some(c), Some(p)) = (self.context, prompt_tokens) {
+                    if fresh && checked != Some(p) {
+                        floor = Some(p);
+                        fresh = false;
+                        checked = Some(p);
+                    }
+                    let grown = floor.map_or(true, |f| p > f + c.saturating_sub(f) / 2);
+                    if p as f64 >= SUMMARIZE_AT * c as f64 && checked != Some(p) && grown {
+                        checked = Some(p);
+                        if trimmed || !drop_old_outputs(&mut messages) {
+                            self.summarize(&mut tr, &mut messages, false).await;
+                            trimmed = false;
+                            fresh = true;
+                        } else {
+                            trimmed = true;
+                        }
+                    }
+                }
+            }
             let mut body = match resume.and_then(|r| r.first_body.as_ref()).filter(|_| round == 0) {
                 Some(first) => first.clone(),
                 None => self.body.clone(),
@@ -1947,6 +2190,54 @@ mod tests {
         let flat = history_messages(&h[..2], History::default());
         assert_eq!(flat.len(), 2);
         assert!(flat[1]["content"].as_str().unwrap().contains("[Called read (fs)"));
+    }
+
+    #[test]
+    fn summaries_replace_what_came_before() {
+        let summary = |keep: bool| json!({ "type": "tool", "id": "s1", "serverId": crate::agent::SERVER_ID, "server": "Agent", "tool": "summarize", "arguments": "{}", "status": "done", "result": "Summarized", "detail": { "keepUser": keep, "summary": "Built the site." } });
+        let tool = json!({ "type": "tool", "id": "c1", "serverId": crate::agent::SERVER_ID, "server": "Agent", "tool": "list", "arguments": "{}", "status": "done", "result": "a.txt" });
+        let opts = History { tools: true, ..Default::default() };
+        // Before a new message: the message stays, after the summary.
+        let h = vec![msg("user", "old task", None), msg("assistant", "done", None), msg("user", "new task", None), msg("assistant", "ok", Some(json!([summary(true), { "type": "text", "text": "ok" }])))];
+        let out = history_messages(&h, opts);
+        assert_eq!(out.len(), 2, "{out:?}");
+        let first = out[0]["content"].as_str().unwrap();
+        assert!(first.starts_with("[This session was summarized") && first.contains("Built the site.") && first.ends_with("new task"), "{first}");
+        assert_eq!(out[1]["content"], "ok");
+        // Mid-reply: the summary stands in for everything, the rounds after it follow.
+        let parts = json!([tool.clone(), summary(false), { "type": "text", "text": "Next." }, tool, { "type": "text", "text": "Done." }]);
+        let h = vec![msg("user", "task", None), msg("assistant", "", Some(parts))];
+        let out = history_messages(&h, opts);
+        assert_eq!(out[0]["role"], "user");
+        assert!(out[0]["content"].as_str().unwrap().contains("Carry on with the task"));
+        assert_eq!(out[1]["content"], "Next.");
+        assert_eq!(out[2]["role"], "tool");
+        assert_eq!(out[3]["content"], "Done.");
+        assert_eq!(out.len(), 4);
+        // A summary that failed changes nothing.
+        let failed = json!([{ "type": "tool", "id": "s1", "serverId": crate::agent::SERVER_ID, "server": "Agent", "tool": "summarize", "arguments": "{}", "status": "error", "result": "no" }, { "type": "text", "text": "hi" }]);
+        let out = history_messages(&[msg("user", "a", None), msg("assistant", "hi", Some(failed))], opts);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["content"], "a");
+    }
+
+    #[test]
+    fn transcripts_cut_outputs_and_files() {
+        let msgs = vec![
+            json!({ "role": "user", "content": "fix it" }),
+            json!({ "role": "assistant", "content": null, "tool_calls": [{ "id": "1", "type": "function", "function": { "name": "agent__read_file", "arguments": "{\"path\":\"a.rs\"}" } }, { "id": "2", "type": "function", "function": { "name": "agent__powershell", "arguments": "{}" } }] }),
+            json!({ "role": "tool", "tool_call_id": "1", "content": "SECRET FILE BODY" }),
+            json!({ "role": "tool", "tool_call_id": "2", "content": "x".repeat(5000) }),
+        ];
+        let t = transcript(&msgs, 100_000);
+        assert!(t.contains("USER:
+fix it") && t.contains("TOOL CALL agent__read_file"));
+        assert!(!t.contains("SECRET FILE BODY"));
+        assert!(t.contains("characters cut"));
+        assert!(transcript(&msgs, 500).chars().count() < 600);
+        let mut m = vec![json!({ "role": "tool", "content": "y".repeat(400) }); 8];
+        assert!(drop_old_outputs(&mut m));
+        assert_eq!(m.iter().filter(|x| x["content"].as_str().unwrap().starts_with("[Output dropped")).count(), 2);
     }
 
     #[test]

@@ -5,6 +5,7 @@
 pub mod checkpoints;
 pub mod diff;
 pub mod files;
+pub mod guard;
 pub mod paths;
 pub mod psparse;
 pub mod rules;
@@ -441,13 +442,16 @@ pub fn folder_prefs(core: &Core, folder: &Path) -> crate::settings::FolderPrefs 
 
 /// Decides a command: read by Auto's rules (in Ask modes too, so the card can
 /// say what Auto would do). Returns what the check learned.
-pub async fn judge_command(core: &Core, ctx: &Ctx, mode: &str, which: shell::Shell, args: &Value) -> (Verdict, rules::Facts) {
+pub async fn judge_command(core: &std::sync::Arc<Core>, ctx: &Ctx, mode: &str, which: shell::Shell, args: &Value) -> (Verdict, rules::Facts) {
     let line = str_arg(args, "command").to_string();
     let may_publish = folder_prefs(core, &ctx.folder).auto_push;
     let c = ctx.clone();
+    let core = core.clone();
     let bypass = mode == "bypass";
     let res = tokio::task::spawn_blocking(move || {
-        let r = rules::Rules { folder: &c.folder, credentials: &c.credentials, scratch: &c.scratch, bypass, may_publish };
+        // Where Relay's guard loads, Python code is judged as it runs.
+        let python_guard = !bypass && guard::global(&core).is_some_and(|g| g.loads(&core, &c, &command_path(&c.folder)));
+        let r = rules::Rules { folder: &c.folder, credentials: &c.credentials, scratch: &c.scratch, bypass, may_publish, python_guard };
         rules::judge_line(&r, which, &line)
     })
     .await
@@ -487,9 +491,21 @@ pub fn secrets(core: &Core, folder: &Path) -> Vec<(String, bool)> {
     out
 }
 
+/// PATH for a command in Auto: the folder's .venv first, when there is one.
+pub fn command_path(folder: &Path) -> String {
+    let path = std::env::var("PATH").unwrap_or_default();
+    let scripts = folder.join(".venv").join("Scripts");
+    if scripts.is_dir() {
+        format!("{};{path}", scripts.display())
+    } else {
+        path
+    }
+}
+
 /// A command's environment in Auto: secrets removed (unless allowed), the
-/// workspace venv first on PATH. Also the allowed secrets' values, to mask.
-pub fn auto_env(core: &Core, ctx: &Ctx) -> (shell::Env, Vec<String>) {
+/// workspace venv first on PATH, Relay's Python guard. Also the allowed
+/// secrets' values, to mask.
+pub fn auto_env(core: &std::sync::Arc<Core>, ctx: &Ctx) -> (shell::Env, Vec<String>) {
     let mut env = shell::Env::new();
     let mut masks = Vec::new();
     for (name, allowed) in secrets(core, &ctx.folder) {
@@ -504,11 +520,12 @@ pub fn auto_env(core: &Core, ctx: &Ctx) -> (shell::Env, Vec<String>) {
         }
     }
     let venv = ctx.folder.join(".venv");
-    let scripts = venv.join("Scripts");
-    if scripts.is_dir() {
-        let path = std::env::var("PATH").unwrap_or_default();
-        env.push(("PATH".into(), Some(format!("{};{path}", scripts.display()))));
+    if venv.join("Scripts").is_dir() {
+        env.push(("PATH".into(), Some(command_path(&ctx.folder))));
         env.push(("VIRTUAL_ENV".into(), Some(venv.display().to_string())));
+    }
+    if let Some(g) = guard::global(core) {
+        env.extend(g.env(core, ctx, folder_prefs(core, &ctx.folder).auto_push));
     }
     (env, masks)
 }

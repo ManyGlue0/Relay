@@ -1178,7 +1178,7 @@ impl Job {
         let mode = ctx.mode(core);
         let which = crate::agent::shell::Shell::of_tool(tool);
         let (verdict, facts) = match which {
-            Some(w) => crate::agent::judge_command(core, ctx, mode, w, args).await,
+            Some(w) => crate::agent::judge_command(&core_arc(&self.app), ctx, mode, w, args).await,
             None => (crate::agent::judge(ctx, mode, tool, args), Default::default()),
         };
         // Auto's Python packages go into the folder's .venv: made first.
@@ -1268,7 +1268,7 @@ impl Job {
         let t0 = Instant::now();
         let res = if let Some(which) = which {
             // Auto: secrets out of the environment (allowed ones masked), the venv on PATH.
-            let (env, masks) = if mode == "auto" { crate::agent::auto_env(core, ctx) } else { Default::default() };
+            let (env, masks) = if mode == "auto" { crate::agent::auto_env(&core_arc(&self.app), ctx) } else { Default::default() };
             // The card shows the output as it comes.
             let base = saved.clone();
             let (mut out, cancelled) = crate::agent::run_command(ctx, which, args, &env, &self.token, |live| {
@@ -1286,6 +1286,12 @@ impl Job {
                 tr.set_tool(part.clone());
             })
             .await;
+            if mode == "auto" {
+                // Relay's Python guard may have refused processes meanwhile.
+                if let Ok(list) = core.db.blocked(&ctx.chat_id) {
+                    let _ = self.app.emit("agent-blocked", json!({ "chatId": ctx.chat_id, "count": list.iter().filter(|e| e["ran"] != true).count() }));
+                }
+            }
             if !masks.is_empty() {
                 out.text = crate::agent::mask(&out.text, &masks);
                 if let Some(o) = out.detail.as_mut().and_then(|d| d.get_mut("output")) {
@@ -1298,7 +1304,7 @@ impl Job {
         } else if tool == "processes" {
             let mut out = crate::agent::processes(ctx, args);
             if mode == "auto" {
-                let (_, masks) = crate::agent::auto_env(core, ctx);
+                let (_, masks) = crate::agent::auto_env(&core_arc(&self.app), ctx);
                 out.text = crate::agent::mask(&out.text, &masks);
             }
             Some(out)

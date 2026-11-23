@@ -774,6 +774,7 @@ pub fn chat_delete(
 ) -> Result<(), String> {
     core.streams.stop_chat(&id);
     agent::shell::Processes::global().stop_all(&id);
+    agent::guard::forget_session(&id);
     let files = core.db.attachment_ids(Some(&id))?;
     let summary = core.db.chat_summary(&id)?;
     core.db.delete_chat(&id)?;
@@ -1018,7 +1019,7 @@ pub async fn agent_run_blocked(app: AppHandle, core: CoreState<'_>, chat_id: Str
     }
     let out = match agent::shell::Shell::of_tool(&tool) {
         Some(which) => {
-            if let (agent::Verdict::Refuse(r), _) = agent::judge_command(&core, &ctx, "bypass", which, &args).await {
+            if let (agent::Verdict::Refuse(r), _) = agent::judge_command(core.inner(), &ctx, "bypass", which, &args).await {
                 return Err(r.why);
             }
             let token = tokio_util::sync::CancellationToken::new();

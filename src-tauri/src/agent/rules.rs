@@ -56,6 +56,8 @@ pub enum Next {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Lang {
     Python,
+    /// Python started with -I, -E or -S: Relay's guard doesn't load.
+    PythonBare,
     Node,
 }
 
@@ -75,6 +77,9 @@ pub struct Rules<'a> {
     pub bypass: bool,
     /// The folder's "Auto may push and publish".
     pub may_publish: bool,
+    /// Relay's Python guard loads in this session's Pythons: their code is
+    /// judged as it runs, not read before.
+    pub python_guard: bool,
 }
 
 fn refuse(rule: &str, why: impl Into<String>, instead: &str) -> Refusal {
@@ -684,13 +689,16 @@ fn pip(r: &Rules, cwd: &Path, args: &[String], facts: &mut Facts) -> Result<(), 
 }
 
 fn python(r: &Rules, cwd: &Path, args: &[String], facts: &mut Facts, next: &mut Vec<Next>) -> Result<(), Refusal> {
+    // -I, -E and -S skip PYTHONPATH or site: the guard doesn't load.
+    let bare = args.iter().take_while(|a| a.starts_with('-') && *a != "-c" && *a != "-m").any(|a| !a.starts_with("--") && a[1..].chars().any(|c| matches!(c, 'I' | 'E' | 'S')));
+    let lang = if bare { Lang::PythonBare } else { Lang::Python };
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
         match a {
             "-c" => {
                 if let Some(code) = args.get(i + 1) {
-                    next.push(Next::Code(Lang::Python, code.clone()));
+                    next.push(Next::Code(lang, code.clone()));
                 }
                 return Ok(());
             }
@@ -712,7 +720,7 @@ fn python(r: &Rules, cwd: &Path, args: &[String], facts: &mut Facts, next: &mut 
                 continue;
             }
             script => {
-                next.push(Next::CodeFile(Lang::Python, paths::resolve(cwd, script)));
+                next.push(Next::CodeFile(lang, paths::resolve(cwd, script)));
                 return Ok(());
             }
         }
@@ -813,8 +821,13 @@ fn node_file(p: &Path) -> PathBuf {
 /// Judges a command line: every command it runs, and the nested lines,
 /// scripts and code they lead to. Blocking (PowerShell's parser, file reads).
 pub fn judge_line(r: &Rules, shell: Shell, line: &str) -> Result<Facts, Refusal> {
+    judge_line_in(r, shell, line, r.folder)
+}
+
+/// `judge_line`, with relative paths starting in `cwd`.
+pub fn judge_line_in(r: &Rules, shell: Shell, line: &str, cwd: &Path) -> Result<Facts, Refusal> {
     let mut facts = Facts::default();
-    let mut queue: Vec<(Next, PathBuf, usize)> = vec![(Next::Line(shell, line.to_string()), r.folder.to_path_buf(), 0)];
+    let mut queue: Vec<(Next, PathBuf, usize)> = vec![(Next::Line(shell, line.to_string()), cwd.to_path_buf(), 0)];
     let mut read = 0usize;
     while let Some((item, cwd, depth)) = queue.pop() {
         if depth > MAX_DEPTH {
@@ -842,10 +855,15 @@ pub fn judge_line(r: &Rules, shell: Shell, line: &str) -> Result<Facts, Refusal>
                 }
                 queue.push((Next::Line(sh, text), cwd, depth + 1));
             }
+            // Guarded Python is judged as it runs.
+            Next::Code(Lang::Python, _) if r.python_guard => {}
             Next::Code(lang, code) => check_code(r, lang, &code)?,
             Next::CodeFile(lang, path) => {
                 let path = if lang == Lang::Node { node_file(&path) } else { path };
                 r.no_credentials(&cwd, &[&path.to_string_lossy()])?;
+                if lang == Lang::Python && r.python_guard {
+                    continue;
+                }
                 let text = read_source(&path)?;
                 check_code(r, lang, &text)?;
             }
@@ -863,14 +881,14 @@ pub fn check_code(r: &Rules, lang: Lang, code: &str) -> Result<(), Refusal> {
         return Ok(());
     }
     let deletes: &[&str] = match lang {
-        Lang::Python => &["os.remove(", "os.unlink(", "shutil.rmtree(", "os.rmdir(", "os.removedirs(", ".unlink(", ".rmdir(", "send2trash"],
+        Lang::Python | Lang::PythonBare => &["os.remove(", "os.unlink(", "shutil.rmtree(", "os.rmdir(", "os.removedirs(", ".unlink(", ".rmdir(", "send2trash"],
         Lang::Node => &["fs.rm(", "fs.rmSync(", "fs.unlink(", "fs.unlinkSync(", "fs.rmdir(", "fs.rmdirSync(", ".rm(", "rimraf", "fs.promises.rm", "fs-extra", "unlinkSync(", "rmSync("],
     };
     if let Some(d) = deletes.iter().find(|d| code.contains(*d)) {
         return Err(refuse("deleting", format!("This code deletes files ({}).", d.trim_end_matches('(')), "leave the files, and mention what could be deleted."));
     }
     let spawns: &[&str] = match lang {
-        Lang::Python => &["subprocess", "os.system(", "os.popen(", "os.exec", "os.spawn", "pty.spawn"],
+        Lang::Python | Lang::PythonBare => &["subprocess", "os.system(", "os.popen(", "os.exec", "os.spawn", "pty.spawn"],
         Lang::Node => &["child_process", "execSync(", "spawnSync(", "exec(", "spawn(", "execFile("],
     };
     if let Some(s) = spawns.iter().find(|s| code.contains(*s)) {
@@ -878,7 +896,7 @@ pub fn check_code(r: &Rules, lang: Lang, code: &str) -> Result<(), Refusal> {
     }
     // Absolute paths in the code that point outside the folder, near a write.
     let writes = match lang {
-        Lang::Python => ["open(", ".write_text(", ".write_bytes(", "shutil.copy", "shutil.move", ".rename("].iter().any(|w| code.contains(w)),
+        Lang::Python | Lang::PythonBare => ["open(", ".write_text(", ".write_bytes(", "shutil.copy", "shutil.move", ".rename("].iter().any(|w| code.contains(w)),
         Lang::Node => ["writeFile", "appendFile", "createWriteStream", "copyFile", "rename("].iter().any(|w| code.contains(w)),
     };
     if writes {
@@ -1329,7 +1347,7 @@ mod tests {
             Fixture { folder: paths::real(&folder), credentials: paths::credential_roots(&[]), scratch: paths::scratch_roots() }
         }
         fn rules(&self) -> Rules<'_> {
-            Rules { folder: &self.folder, credentials: &self.credentials, scratch: &self.scratch, bypass: false, may_publish: false }
+            Rules { folder: &self.folder, credentials: &self.credentials, scratch: &self.scratch, bypass: false, may_publish: false, python_guard: false }
         }
         /// The rule that refuses `line`, or "" when it's allowed.
         fn rule(&self, shell: Shell, line: &str) -> String {
@@ -1401,6 +1419,14 @@ mod tests {
         let r = Rules { may_publish: true, ..f.rules() };
         assert!(judge_line(&r, Shell::Bash, "git push origin main").is_ok());
         assert!(judge_line(&r, Shell::Bash, "git push -f").is_err());
+        // With Relay's guard loading, Python is judged as it runs, except
+        // where -I, -E or -S keep the guard out.
+        let r = Rules { python_guard: true, ..f.rules() };
+        assert!(judge_line(&r, Shell::Bash, "python bad.py").is_ok());
+        assert!(judge_line(&r, Shell::Bash, "python -c 'import subprocess'").is_ok());
+        assert_eq!(judge_line(&r, Shell::Bash, "python -I bad.py").unwrap_err().rule, "deleting");
+        assert_eq!(judge_line(&r, Shell::Bash, "python -IS -c 'import shutil; shutil.rmtree(\"x\")'").unwrap_err().rule, "deleting");
+        assert_eq!(judge_line(&r, Shell::Bash, "python ~/.ssh/x.py").unwrap_err().rule, "reading credentials");
         // Bypass: only credentials.
         let r = Rules { bypass: true, ..f.rules() };
         assert!(judge_line(&r, Shell::Bash, "rm -rf build && git push --force").is_ok());

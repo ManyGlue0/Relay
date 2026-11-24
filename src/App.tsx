@@ -58,7 +58,13 @@ export default function App() {
       on("skills-changed", () => void useStore.getState().refreshSkills()),
       on("agent-blocked", () => useStore.setState((s) => ({ blockedSeq: s.blockedSeq + 1 }))),
       on<{ chatId: string; waiting: boolean }>("chat-waiting", (w) => useStore.setState((s) => ({ waiting: { ...s.waiting, [w.chatId]: w.waiting } }))),
-      on<Message>("stream-end", (m) => useStore.setState((s) => (s.waiting[m.chatId] ? { waiting: { ...s.waiting, [m.chatId]: false } } : {}))),
+      on<{ chatId: string; tokens: number }>("chat-context", (c) => useStore.setState((s) => ({ liveContext: { ...s.liveContext, [c.chatId]: c.tokens } }))),
+      on<Message>("stream-end", (m) =>
+        useStore.setState((s) => {
+          const { [m.chatId]: _, ...liveContext } = s.liveContext;
+          return { liveContext, ...(s.waiting[m.chatId] ? { waiting: { ...s.waiting, [m.chatId]: false } } : {}) };
+        }),
+      ),
       on<string>("open-chat", (id) => void useStore.getState().openChat(id)),
       on<string>("navigate", (to) => {
         if (to === "settings") useStore.getState().openSettings();

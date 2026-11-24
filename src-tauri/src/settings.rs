@@ -23,6 +23,9 @@ pub struct Settings {
     pub send_key: String,
     /// Reasoning shows open while the model thinks, then folds away.
     pub expand_thinking: bool,
+    /// How a reply's text appears while it streams: "token" (as it comes),
+    /// "sentence", "paragraph" or "whole" (when it's done). Display only.
+    pub reveal: String,
     /// Speed and token counts under each reply.
     pub show_stats: bool,
     /// The model new chats start with.
@@ -151,6 +154,7 @@ impl Default for Settings {
             auto_titles: true,
             send_key: "enter".into(),
             expand_thinking: true,
+            reveal: "token".into(),
             show_stats: true,
             default_model: None,
             default_effort: "medium".into(),

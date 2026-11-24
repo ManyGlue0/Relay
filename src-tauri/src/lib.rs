@@ -301,8 +301,6 @@ pub fn run() {
             commands::tool_answer,
             commands::agent_blocked,
             commands::agent_all_changes,
-            commands::agent_git_dirty,
-            commands::agent_git_commit,
             commands::agent_run_blocked,
             commands::agent_clear_blocked,
             commands::agent_folder_settings,

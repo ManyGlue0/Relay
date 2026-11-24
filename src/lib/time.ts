@@ -39,6 +39,15 @@ export function seconds(ms: number): string {
   return `${m} min ${Math.round(s - m * 60)} s`;
 }
 
+/** How long something has gone on, as a clock reads: "45s", "12m 04s", "1h 02m". */
+export function duration(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${String(s % 60).padStart(2, "0")}s`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+}
+
 /** When a message was sent, the way you'd say it: "Just now", "5 minutes ago",
  *  "3 hours ago" (the same day), then the date and time ("2 Nov, 14:05"). */
 export function sentAgo(ms: number, now: number): string {

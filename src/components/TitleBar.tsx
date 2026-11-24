@@ -1,11 +1,13 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AnimatePresence, motion } from "framer-motion";
-import { Activity, Ban, Bot, Copy as RestoreIcon, FileStack, FolderClosed, GitBranch, MessageCircle, Minus, PanelLeft, Play, Square, Trash2, X } from "lucide-react";
+import { Activity, Ban, Bot, Copy as RestoreIcon, FileStack, FolderClosed, GitBranch, MessageCircle, Minus, PanelLeft, Play, Square, Timer, Trash2, X } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import { api, errorText, type BlockedStep, type ChatKind, type ProcessView } from "../lib/api";
 import { folderName, useFolderInfo } from "../lib/folder";
 import { spring } from "../lib/motion";
-import { useStore, useView } from "../lib/store";
+import { replyStarted, useStore, useView } from "../lib/store";
+import { duration } from "../lib/time";
+import { AutoAccessButton } from "./AutoAccess";
 import { SECTIONS } from "./Sidebar";
 import { IconButton, MenuItem, MenuSeparator, Pill, Popover, anchorFrom, type Anchor } from "./ui";
 
@@ -41,6 +43,7 @@ export function TitleBar({ sidebarWidth }: { sidebarWidth: number }) {
         {!settingsOpen && <SessionMeta />}
       </div>
       {!settingsOpen && <BlockedChip />}
+      <AutoAccessButton />
       {!settingsOpen && <ProcessesChip />}
       {!settingsOpen && <FilesToggle />}
       <div className="caption">
@@ -74,6 +77,27 @@ function SessionMeta() {
           <span className="title-meta-text">{info.branch}</span>
         </>
       )}
+      <WorkTimer chatId={chat.id} />
+    </span>
+  );
+}
+
+/** While the agent works: how long it has been at it, ticking. */
+function WorkTimer({ chatId }: { chatId: string }) {
+  const busy = useStore((s) => !!s.streaming[chatId]);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!busy) return;
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [busy]);
+  const start = busy ? replyStarted(chatId) : undefined;
+  if (start === undefined) return null;
+  return (
+    <span className="work-timer" title="How long the agent has been working on this message">
+      <Timer size={13} />
+      <span className="title-meta-text">Working · {duration(now - start)}</span>
     </span>
   );
 }

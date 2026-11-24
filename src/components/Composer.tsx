@@ -1,8 +1,8 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { AnimatePresence, motion } from "framer-motion";
-import { BookMarked, ChevronDown, CircleAlert, FilePen, FolderClosed, FolderOpen, GitCommitHorizontal, Globe, Hand, KeyRound, Mic, Paperclip, Plug, Plus, RefreshCw, ShieldCheck, ShieldOff, SlidersHorizontal, Square, Upload, X, type LucideIcon } from "lucide-react";
+import { BookMarked, ChevronDown, CircleAlert, FilePen, FolderClosed, FolderOpen, Globe, Hand, Mic, Paperclip, Plug, Plus, RefreshCw, ShieldCheck, ShieldOff, SlidersHorizontal, Square, X, type LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api, errorText, type AgentMode, type FolderSettings } from "../lib/api";
+import { api, errorText, type AgentMode } from "../lib/api";
 import { folderName, useFolderInfo } from "../lib/folder";
 import { clock, micError, record, type Recording } from "../lib/media";
 import { spring } from "../lib/motion";
@@ -107,8 +107,6 @@ export function Composer({ chatId, streaming }: { chatId: string | null; streami
         }}
       />
       {agent && <NoToolsNote />}
-      {agent && <SecretsNote />}
-      {agent && <GitNote />}
       <div className="composer-bar">
         <PlusMenu />
         {agent && <FolderChip />}
@@ -381,11 +379,6 @@ function FolderChip() {
   const [anchor, setAnchor] = useState<Anchor | null>(null);
   const btn = useRef<HTMLButtonElement>(null);
   const close = () => setAnchor(null);
-  const [folderSettings, setSettings] = useState<FolderSettings | null>(null);
-  useEffect(() => {
-    if (!anchor || !folder) return;
-    void api.folderSettings(folder).then(setSettings).catch(() => {});
-  }, [anchor, folder]);
 
   const pick = async () => {
     const picked = await open({ directory: true, title: "Pick the session's folder" });
@@ -416,7 +409,6 @@ function FolderChip() {
 
   if (!folder) return null;
   const missing = info !== null && !info.exists;
-  const settings = folderSettings;
   return (
     <>
       <button
@@ -454,18 +446,6 @@ function FolderChip() {
           >
             Reload instructions
           </MenuItem>
-          {settings && (
-            <>
-              <MenuSeparator />
-              <SwitchItem
-                icon={<Upload size={15} />}
-                label="Auto may push and publish"
-                hint="In Auto: git push, gh pr create, npm publish and the like run instead of being refused (force pushes stay refused)"
-                on={settings.autoPush}
-                onChange={(on) => void api.setFolderSettings(folder, { autoPush: on }).then(setSettings)}
-              />
-            </>
-          )}
         </div>
       </Popover>
     </>
@@ -493,79 +473,6 @@ function NoToolsNote() {
     <div className="composer-note">
       <CircleAlert size={13} />
       <span>{shortModel(model!.model)} can't call tools, so it can't read or change files here. Pick another model.</span>
-    </div>
-  );
-}
-
-/** Before a session starts in a repository with uncommitted changes, Ask
- *  modes offer a work-in-progress commit first (Auto never commits on its own). */
-function GitNote() {
-  const mode = useMode();
-  const fresh = useStore((s) => !s.current || s.current.messages.length === 0);
-  const folder = useStore((s) => (s.current ? s.current.folder : (s.draftOptions.folder ?? null)));
-  const [dirty, setDirty] = useState<number | null>(null);
-  const [busy, setBusy] = useState(false);
-  const asks = mode === "ask" || mode === "edits";
-  useEffect(() => {
-    if (!fresh || !asks || !folder) return setDirty(null);
-    let live = true;
-    void api.gitDirty(folder).then((n) => live && setDirty(n)).catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, [fresh, asks, folder]);
-  if (!fresh || !asks || !folder || !dirty) return null;
-  const commit = () => {
-    setBusy(true);
-    void api
-      .gitCommit(folder)
-      .then((id) => {
-        setDirty(0);
-        useStore.getState().toast(`Committed as ${id}: the session starts from a clean repository`);
-      })
-      .catch((e) => useStore.getState().toast(errorText(e)))
-      .finally(() => setBusy(false));
-  };
-  return (
-    <div className="composer-note git-note">
-      <GitCommitHorizontal size={13} />
-      <span className="secrets-names">{dirty === 1 ? "This repository has 1 uncommitted change." : `This repository has ${dirty} uncommitted changes.`}</span>
-      <button className="note-link" disabled={busy} onClick={commit} title="Commits everything as it is (git add -A, then a work-in-progress commit)">
-        {busy ? "Committing…" : "Commit first"}
-      </button>
-    </div>
-  );
-}
-
-/** In Auto: the secret environment variables commands won't see, with a way
- *  to let one through for this folder (its value stays hidden from the model). */
-function SecretsNote() {
-  const mode = useMode();
-  const folder = useStore((s) => (s.current ? s.current.folder : (s.draftOptions.folder ?? null)));
-  const [settings, setSettings] = useState<FolderSettings | null>(null);
-  const [anchor, setAnchor] = useState<Anchor | null>(null);
-  const btn = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (mode !== "auto" || !folder) return setSettings(null);
-    void api.folderSettings(folder).then(setSettings).catch(() => {});
-  }, [mode, folder]);
-  if (mode !== "auto" || !folder || !settings || settings.secrets.length === 0) return null;
-  const hidden = settings.secrets.filter((x) => !x.allowed).map((x) => x.name);
-  return (
-    <div className="composer-note secrets-note">
-      <KeyRound size={13} />
-      <span className="secrets-names">{hidden.length ? `Hidden from commands in Auto: ${hidden.join(", ")}` : "Every secret in the environment is allowed for this folder"}</span>
-      <button ref={btn} className="note-link" onClick={() => (anchor ? setAnchor(null) : setAnchor(anchorFrom(btn.current!, { above: true })))}>
-        Manage
-      </button>
-      <Popover anchor={anchor} onClose={() => setAnchor(null)} width={300} trigger={btn}>
-        <div className="menu">
-          <div className="menu-note">Allowed secrets reach commands in this folder; their values are hidden in what the model reads.</div>
-          {settings.secrets.map((x) => (
-            <SwitchItem key={x.name} label={x.name} on={x.allowed} onChange={(allow) => void api.setFolderSettings(folder, { secret: x.name, allow }).then(setSettings)} />
-          ))}
-        </div>
-      </Popover>
     </div>
   );
 }
@@ -638,11 +545,13 @@ function ContextMeter() {
   const model = useActiveModel();
   const current = useStore((s) => s.current);
   const limit = useStore((s) => (model ? s.contexts[`${model.providerId}/${model.model}`] : null));
+  const live = useStore((s) => (s.currentId ? s.liveContext[s.currentId] : undefined));
   const last = current?.messages
     .slice()
     .reverse()
-    .find((m) => m.role === "assistant" && m.stats?.promptTokens);
-  const used = last ? (last.stats!.promptTokens ?? 0) + (last.stats!.completionTokens ?? 0) : 0;
+    .find((m) => m.role === "assistant" && (m.stats?.contextTokens || m.stats?.promptTokens));
+  // Replies from before `contextTokens` have only the last request.
+  const used = live ?? (last ? (last.stats!.contextTokens ?? last.stats!.promptTokens ?? 0) : 0);
   if (!used) return null;
   const pct = limit ? Math.min(1, used / limit) : null;
   const r = 7;

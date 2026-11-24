@@ -1,4 +1,4 @@
-import { motion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   Activity,
   Check,
@@ -6,6 +6,7 @@ import {
   Circle,
   CircleDot,
   ListTodo,
+  Minus,
   MessageCircleQuestion,
   CircleAlert,
   CircleCheck,
@@ -26,9 +27,10 @@ import { useEffect, useRef, useState } from "react";
 import { api, errorText, type Answer, type DiffRow, type Part, type Question, type ToolDecision, type ToolDetail } from "../lib/api";
 import { spring } from "../lib/motion";
 import { useStore } from "../lib/store";
+import { useShallow } from "zustand/react/shallow";
 import { seconds } from "../lib/time";
 import { Markdown } from "./Markdown";
-import { Button } from "./ui";
+import { Button, IconButton } from "./ui";
 
 type ToolPart = Extract<Part, { type: "tool" }>;
 
@@ -81,8 +83,11 @@ function face(part: ToolPart, detail: ToolDetail) {
         verb: part.tool === "powershell" ? "PowerShell" : part.tool === "bash" ? "Bash" : "cmd",
         ask: a.background ? "Run this in the background?" : "Run this command?",
       };
-    case "processes":
-      return { icon: <Activity size={13} />, name: [str("action") || "list", a.id != null ? String(a.id) : ""].filter(Boolean).join(" "), verb: "Processes", ask: "" };
+    case "processes": {
+      const id = a.id != null ? String(a.id) : "";
+      const name = { wait: `Wait for process ${id}`, read: `Read process ${id}'s output`, stop: `Stop process ${id}` }[str("action")] ?? "List the background processes";
+      return { icon: <Activity size={13} />, name, verb: "Processes", ask: "", plain: true };
+    }
     default:
       return { icon: <FileText size={13} />, name: part.tool, verb: "Agent", ask: "Let the model do this?" };
   }
@@ -93,9 +98,9 @@ const EDITS = new Set(["write_file", "edit_file", "delete_path"]);
 
 const SHELLS = new Set(["powershell", "bash", "cmd"]);
 
-export function AgentToolCard({ part, messageId, stale }: { part: ToolPart; messageId: string; stale?: boolean }) {
+export function AgentToolCard({ part, messageId }: { part: ToolPart; messageId: string }) {
   if (part.tool === "ask_user") return <QuestionCard part={part} messageId={messageId} />;
-  if (part.tool === "todo") return <TodoCard part={part} stale={!!stale} />;
+  if (part.tool === "todo") return <TodoCard part={part} />;
   if (part.tool === "summarize") return <SummaryDivider part={part} />;
   return <StepCard part={part} messageId={messageId} />;
 }
@@ -152,7 +157,11 @@ function StepCard({ part, messageId }: { part: ToolPart; messageId: string }) {
   const [open, setOpen] = useState(false);
   const detail: ToolDetail = part.detail ?? {};
   const f = face(part, detail);
+  const args = argsOf(part);
+  // The model's own words for the step, for people who don't read code.
+  const explained = typeof args.description === "string" ? args.description.trim() : "";
   const command = SHELLS.has(part.tool);
+  const commandText = command ? (typeof args.command === "string" ? args.command : part.arguments) : "";
   let st = STATUS[part.status] ?? STATUS.running;
   // Commands say how they ended.
   if (command && part.status === "done" && detail.process != null) st = { label: `In the background · ${detail.process}`, icon: <Activity size={14} /> };
@@ -161,31 +170,55 @@ function StepCard({ part, messageId }: { part: ToolPart; messageId: string }) {
   const asking = part.status === "approval";
   const diff = detail.diff;
   const showDiff = !!diff && (asking || part.status === "done") && diff.hunks.length > 0;
+  const restorable = detail.checkpoint != null && part.status !== "running" && part.status !== "denied";
   const decide = (d: ToolDecision) => void useStore.getState().decideTool(messageId, part.id, d);
+  const head = (
+    <>
+      <span className="tool-well">{f.icon}</span>
+      {f.plain && !explained ? (
+        <span className="tool-title">{f.name}</span>
+      ) : explained ? (
+        <>
+          <span className="tool-title" title={explained}>
+            {explained}
+          </span>
+          {!command && <span className="tool-sub">{f.name}</span>}
+        </>
+      ) : (
+        <>
+          <span className="tool-verb">{f.verb}</span>
+          <span className="tool-name">{f.name}</span>
+        </>
+      )}
+      {diff && (diff.added > 0 || diff.removed > 0) && (
+        <span className="diff-stat">
+          {diff.added > 0 && <span className="add">+{diff.added}</span>}
+          {diff.removed > 0 && <span className="del">−{diff.removed}</span>}
+        </span>
+      )}
+      <span className="tool-fill" />
+      <span className="tool-status">
+        {st.icon}
+        <span>{st.label}</span>
+        {part.ms != null && part.ms >= 10 && !asking && <span className="tool-ms">{seconds(part.ms)}</span>}
+      </span>
+    </>
+  );
   return (
     <div className={`tool-card agent-card ${part.status}`}>
-      <button className="tool-head" onClick={() => setOpen(!open)}>
-        <span className="tool-well">{f.icon}</span>
-        <span className="tool-verb">{f.verb}</span>
-        <span className="tool-name">{f.name}</span>
-        {diff && (diff.added > 0 || diff.removed > 0) && (
-          <span className="diff-stat">
-            {diff.added > 0 && <span className="add">+{diff.added}</span>}
-            {diff.removed > 0 && <span className="del">−{diff.removed}</span>}
-          </span>
-        )}
-        <span className="tool-fill" />
-        <span className="tool-status">
-          {st.icon}
-          <span>{st.label}</span>
-          {part.ms != null && part.ms >= 10 && !asking && <span className="tool-ms">{seconds(part.ms)}</span>}
-        </span>
-        <motion.span className="pill-chev" animate={{ rotate: open ? 90 : 0 }} transition={spring}>
-          <ChevronRight size={14} />
-        </motion.span>
-      </button>
+      {asking ? (
+        // Nothing to open while it waits: everything it asks about is showing.
+        <div className="tool-head still">{head}</div>
+      ) : (
+        <button className="tool-head" onClick={() => setOpen(!open)} aria-expanded={open}>
+          {head}
+          <motion.span className="pill-chev" animate={{ rotate: open ? 90 : 0 }} transition={spring}>
+            <ChevronRight size={14} />
+          </motion.span>
+        </button>
+      )}
+      {command && (asking || open) && <CommandLine shell={f.verb} text={commandText} />}
       {showDiff && <DiffView rows={diff.hunks} truncated={diff.truncated} />}
-      {command && asking && <pre className="cmd-line">{(() => { try { return (JSON.parse(part.arguments) as { command?: string }).command ?? part.arguments; } catch { return part.arguments; } })()}</pre>}
       {command && !asking && (open || part.status === "running") && <Terminal text={detail.output ?? ""} live={part.status === "running"} />}
       {part.status === "blocked" && detail.blocked && (
         <div className="blocked-why">
@@ -216,14 +249,25 @@ function StepCard({ part, messageId }: { part: ToolPart; messageId: string }) {
           </div>
         </div>
       )}
-      {detail.checkpoint != null && !asking && part.status !== "running" && part.status !== "denied" && <RestoreBar checkpoint={detail.checkpoint} />}
-      {detail.unprotected && !asking && <div className="tool-unprotected">Not undoable: {detail.unprotected}</div>}
       {open && !asking && !command && (
         <div className="tool-body">
+          {explained && <div className="tool-label">{`${f.verb} ${f.name}`}</div>}
           {part.result != null && <pre className="tool-result">{part.result || "(empty)"}</pre>}
           {part.result == null && <pre className="tool-args">{part.arguments}</pre>}
         </div>
       )}
+      {open && !asking && detail.unprotected && <div className="tool-unprotected">Not undoable: {detail.unprotected}</div>}
+      {open && !asking && restorable && <RestoreBar checkpoint={detail.checkpoint!} />}
+    </div>
+  );
+}
+
+/** The command a step runs, whole: in approvals and opened cards. */
+function CommandLine({ shell, text }: { shell: string; text: string }) {
+  return (
+    <div className="cmd-block">
+      <div className="cmd-shell">{shell}</div>
+      <pre className="cmd-line">{text}</pre>
     </div>
   );
 }
@@ -321,40 +365,98 @@ function answerText(a: Answer | undefined): string | null {
   return parts.length ? parts.join(", ") : "No answer";
 }
 
-/** The model's to-do list. Earlier versions in the same reply fold to one line. */
-function TodoCard({ part, stale }: { part: ToolPart; stale: boolean }) {
+/** The model's to-do list, in the conversation: one line. The list itself
+ *  floats over the chat (`TodoFloat`), where it's always in sight. */
+function TodoCard({ part }: { part: ToolPart }) {
   const items = part.detail?.items ?? [];
   const done = items.filter((i) => i.status === "done").length;
-  if (stale) {
-    return (
-      <div className="todo-line">
-        <ListTodo size={13} />
-        <span>
-          Updated the to-do list · {done}/{items.length}
-        </span>
-      </div>
-    );
-  }
   return (
-    <div className="tool-card todo-card">
-      <div className="question-head">
-        <span className="tool-well">
-          <ListTodo size={13} />
-        </span>
-        <span className="tool-verb">To-do</span>
-        <span className="tool-fill" />
-        <span className="todo-count">
-          {done}/{items.length}
-        </span>
-      </div>
-      <ul className="todo-list">
-        {items.map((it, i) => (
-          <li key={i} className={`todo-item ${it.status}`}>
-            {it.status === "done" ? <CircleCheck size={14} /> : it.status === "in_progress" ? <CircleDot size={14} /> : <Circle size={14} />}
-            <span>{it.text}</span>
-          </li>
-        ))}
-      </ul>
+    <div className="todo-line">
+      <ListTodo size={13} />
+      <span>{items.length ? `Updated the to-do list · ${done}/${items.length}` : "Cleared the to-do list"}</span>
+    </div>
+  );
+}
+
+type TodoItem = NonNullable<ToolDetail["items"]>[number];
+
+/** The newest to-do list on the conversation's branch (null: none, or emptied). */
+function useTodo(): TodoItem[] | null {
+  return useStore(
+    useShallow((s) => {
+      const msgs = s.current && s.current.id === s.currentId ? s.current.messages : [];
+      for (let m = msgs.length - 1; m >= 0; m--) {
+        const parts = msgs[m].parts ?? [];
+        for (let i = parts.length - 1; i >= 0; i--) {
+          const p = parts[i];
+          if (p.type === "tool" && p.tool === "todo" && p.detail?.items) return p.detail.items.length ? p.detail.items : null;
+        }
+      }
+      return null;
+    }),
+  );
+}
+
+/** The to-do list, floating at the chat's top right; folds to a chip. */
+export function TodoFloat() {
+  const items = useTodo();
+  const chatId = useStore((s) => s.currentId);
+  const choice = useStore((s) => (chatId ? s.todoFolded[chatId] : undefined));
+  if (!items || !chatId) return null;
+  const done = items.filter((i) => i.status === "done").length;
+  // Unless you say otherwise, it folds away once everything is done.
+  const folded = choice ?? done === items.length;
+  const fold = (on: boolean) => useStore.setState((s) => ({ todoFolded: { ...s.todoFolded, [chatId]: on } }));
+  return (
+    <div className="todo-float-wrap">
+      <AnimatePresence initial={false} mode="popLayout">
+        {folded ? (
+          <motion.button
+            key="chip"
+            className="todo-chip"
+            title="Show the to-do list"
+            onClick={() => fold(false)}
+            initial={{ opacity: 0, scale: 0.92 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.92 }}
+            transition={spring}
+          >
+            <ListTodo size={14} />
+            <span className="todo-count">
+              {done}/{items.length}
+            </span>
+          </motion.button>
+        ) : (
+          <motion.div
+            key="card"
+            className="todo-float"
+            initial={{ opacity: 0, scale: 0.96, y: -4 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.96, y: -4 }}
+            transition={spring}
+          >
+            <div className="todo-float-head">
+              <ListTodo size={14} className="todo-float-icon" />
+              <span className="todo-float-title">To-do</span>
+              <span className="todo-count">
+                {done}/{items.length}
+              </span>
+              <span className="tool-fill" />
+              <IconButton size="small" label="Fold the to-do list" onClick={() => fold(true)}>
+                <Minus size={14} />
+              </IconButton>
+            </div>
+            <ul className="todo-list">
+              {items.map((it, i) => (
+                <li key={i} className={`todo-item ${it.status}`}>
+                  {it.status === "done" ? <CircleCheck size={14} /> : it.status === "in_progress" ? <CircleDot size={14} /> : <Circle size={14} />}
+                  <span>{it.text}</span>
+                </li>
+              ))}
+            </ul>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -368,7 +470,7 @@ function Terminal({ text, live }: { text: string; live: boolean }) {
   }, [text, live]);
   return (
     <pre ref={ref} className="terminal">
-      {text || (live ? "Waiting for output…" : "No output.")}
+      {text.trim() ? text : live ? "Waiting for output…" : "No output."}
     </pre>
   );
 }
@@ -388,23 +490,12 @@ function RestoreBar({ checkpoint }: { checkpoint: number }) {
   );
 }
 
-/** Rows a diff shows before "Show all". */
-const FOLDED = 12;
-
+/** A change's hunks, in a box that scrolls. */
 export function DiffView({ rows, truncated }: { rows: DiffRow[][]; truncated?: boolean }) {
-  const [all, setAll] = useState(false);
-  const total = rows.reduce((n, h) => n + h.length, 0);
-  let left = all ? Infinity : FOLDED;
-  const shown: DiffRow[][] = [];
-  for (const h of rows) {
-    if (left <= 0) break;
-    shown.push(h.slice(0, left));
-    left -= h.length;
-  }
   return (
     <div className="diff">
       <div className="diff-scroll">
-        {shown.map((h, i) => (
+        {rows.map((h, i) => (
           <div key={i} className="diff-hunk">
             {i > 0 && <div className="diff-gap">⋯</div>}
             {h.map(([kind, a, b, text], j) => (
@@ -417,13 +508,8 @@ export function DiffView({ rows, truncated }: { rows: DiffRow[][]; truncated?: b
             ))}
           </div>
         ))}
+        {truncated && <div className="diff-cut">The rest of this change is too long to show here.</div>}
       </div>
-      {total > FOLDED && (
-        <button className="diff-more" onClick={() => setAll(!all)}>
-          {all ? "Show less" : `Show all ${total} lines`}
-        </button>
-      )}
-      {all && truncated && <div className="diff-cut">The rest of this change is too long to show here.</div>}
     </div>
   );
 }

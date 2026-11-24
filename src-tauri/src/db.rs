@@ -330,6 +330,12 @@ CREATE INDEX checkpoint_files_path ON checkpoint_files(path);
 CREATE INDEX checkpoint_files_hash ON checkpoint_files(hash);
 "#;
 
+/// v9: what an Agent session's model is told about the folder as it was when
+/// the session started (uncommitted changes in its repository).
+const SCHEMA_V9: &str = r#"
+ALTER TABLE chats ADD COLUMN start_note TEXT;
+"#;
+
 const SCHEMA_V7: &str = r#"
 ALTER TABLE chats ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat';
 ALTER TABLE chats ADD COLUMN folder TEXT;
@@ -639,6 +645,9 @@ impl Db {
         }
         if version < 8 {
             conn.execute_batch(&format!("BEGIN; {SCHEMA_V8} PRAGMA user_version = 8; COMMIT;"))?;
+        }
+        if version < 9 {
+            conn.execute_batch(&format!("BEGIN; {SCHEMA_V9} PRAGMA user_version = 9; COMMIT;"))?;
         }
         // A reply that was streaming when Relay closed will never finish.
         conn.execute("UPDATE messages SET status = 'stopped' WHERE status = 'streaming'", [])?;
@@ -977,6 +986,15 @@ impl Db {
 
     pub fn set_instructions(&self, id: &str, text: &str) -> Result<(), String> {
         self.with(|c| c.execute("UPDATE chats SET instructions = ?2 WHERE id = ?1", params![id, text]).map(|_| ()))
+    }
+
+    /// The note about the folder as it was when the session started (None: nothing to say).
+    pub fn start_note(&self, id: &str) -> Result<Option<String>, String> {
+        self.with(|c| c.query_row("SELECT start_note FROM chats WHERE id = ?1", [id], |r| r.get(0)).optional()).map(Option::flatten)
+    }
+
+    pub fn set_start_note(&self, id: &str, text: Option<&str>) -> Result<(), String> {
+        self.with(|c| c.execute("UPDATE chats SET start_note = ?2 WHERE id = ?1", params![id, text]).map(|_| ()))
     }
 
     /// An Agent session's blocked list (Auto's refusals), oldest first.

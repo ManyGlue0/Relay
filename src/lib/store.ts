@@ -93,6 +93,10 @@ interface State {
   blockedSeq: number;
   /** Chats whose reply waits for the user (an approval, a question). */
   waiting: Record<string, boolean>;
+  /** A running reply's context so far, per chat (round by round, from `chat-context`). */
+  liveContext: Record<string, number>;
+  /** Chats whose floating to-do list is folded to a chip. */
+  todoFolded: Record<string, boolean>;
   /** Checkpoints pruning made unrestorable, by id (for the step cards). */
   collapsed: Record<number, true>;
 
@@ -193,6 +197,8 @@ export const useStore = create<State>((set, get) => ({
   filesPanel: false,
   blockedSeq: 0,
   waiting: {},
+  liveContext: {},
+  todoFolded: {},
   collapsed: {},
 
   async probeProviders() {
@@ -843,6 +849,17 @@ function draftFrom(settings: Settings, kind: ChatKind): ChatOptions {
 /** Chat or Agent. */
 export function viewOf(s: Pick<State, "settings">): ChatKind {
   return s.settings?.view === "agent" ? "agent" : "chat";
+}
+
+/** When each running reply started (seen streaming), for the title bar's timer. */
+const replyStarts: Record<string, number> = {};
+useStore.subscribe((s, prev) => {
+  if (s.streaming === prev.streaming) return;
+  for (const id of Object.keys(s.streaming)) replyStarts[id] ??= Date.now();
+  for (const id of Object.keys(replyStarts)) if (!s.streaming[id]) delete replyStarts[id];
+});
+export function replyStarted(chatId: string): number | undefined {
+  return replyStarts[chatId];
 }
 
 export function useView(): ChatKind {

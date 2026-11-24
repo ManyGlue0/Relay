@@ -997,18 +997,6 @@ pub async fn agent_all_changes(core: CoreState<'_>, chat_id: String) -> Result<V
     .await
 }
 
-/// How many uncommitted changes the folder's repository has (null: not a repository).
-#[tauri::command]
-pub async fn agent_git_dirty(folder: String) -> Option<usize> {
-    tokio::task::spawn_blocking(move || agent::git_dirty(std::path::Path::new(&folder))).await.ok().flatten()
-}
-
-/// "Commit first": a work-in-progress commit before the session starts.
-#[tauri::command]
-pub async fn agent_git_commit(folder: String) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || agent::git_commit_wip(std::path::Path::new(&folder))).await.map_err(|e| e.to_string())?
-}
-
 /// A session's blocked list (Auto's refusals), oldest first.
 #[tauri::command]
 pub fn agent_blocked(core: CoreState, chat_id: String) -> Result<Vec<Value>, String> {

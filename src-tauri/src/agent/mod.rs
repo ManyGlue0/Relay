@@ -102,14 +102,31 @@ pub fn tool_specs(cmd: bool) -> Vec<(&'static str, String, Value)> {
     }
     out.push((
         "processes",
-        "The session's background processes: list them, read one's recent output, or stop one.".to_string(),
+        "The session's background processes: list them, read one's recent output, wait for one, or stop one. To wait for a build, tests or a long run to finish, use wait (it returns as soon as the process ends, or prints the until text) instead of reading it over and over.".to_string(),
         json!({ "type": "object", "properties": {
-            "action": { "type": "string", "enum": ["list", "read", "stop"] },
-            "id": { "type": "integer", "description": "The process, for read and stop." },
-            "lines": { "type": "integer", "description": "How much recent output to read (characters, default 4000)." }
+            "action": { "type": "string", "enum": ["list", "read", "wait", "stop"] },
+            "id": { "type": "integer", "description": "The process, for read, wait and stop." },
+            "lines": { "type": "integer", "description": "How much recent output to read (characters, default 4000)." },
+            "seconds": { "type": "integer", "description": "For wait: the longest to wait (default 120, at most 600)." },
+            "until": { "type": "string", "description": "For wait: also return as soon as the process prints this text (like \"Listening on\" or \"Done\")." }
         }, "required": ["action"] }),
     ));
+    for (_, _, schema) in out.iter_mut() {
+        explained(schema);
+    }
     out
+}
+
+/// What every agent step says about itself: the card's title, so someone who
+/// doesn't read code still follows along.
+const EXPLAIN: &str = "What this step does and why, in a few plain words for someone who isn't a programmer, like \"Count the lines in every Python file\" or \"Start the website so it can be tried\". Shown to the user as the step's title.";
+
+fn explained(schema: &mut Value) {
+    schema["properties"]["description"] = json!({ "type": "string", "description": EXPLAIN });
+    match schema["required"].as_array_mut() {
+        Some(r) => r.insert(0, json!("description")),
+        None => schema["required"] = json!(["description"]),
+    }
 }
 
 /// Asking the user and the to-do list: in Agent sessions (asking only where
@@ -291,7 +308,7 @@ fn file_specs() -> Vec<(&'static str, &'static str, Value)> {
 }
 
 /// The agent's part of the system prompt. It changes only with the mode.
-pub fn prompt(folder: &str, mode: &str, instructions: Option<&str>) -> String {
+pub fn prompt(folder: &str, mode: &str, instructions: Option<&str>, start_note: Option<&str>) -> String {
     let rules = match mode {
         "edits" => "File changes in the folder run right away; commands and anything outside the folder wait for the user's OK.",
         "auto" => "Auto mode: the user isn't watching and nothing waits for them. Steps the rules don't allow are refused with a reason: don't try another way to do the same thing, carry on with the rest. Don't stop to ask questions: decide sensibly, and at the end list what was blocked, the questions you'd have asked and the assumptions you made.",
@@ -304,6 +321,10 @@ Work step by step until the task is done: look before you change things (list, s
 run commands to build, test and check your work (prefer the file tools over shell commands for reading and editing files). Paths are relative to the folder. Don't claim to have changed a file unless a tool call did it. \
 When you're done, say briefly what you did and anything left open.\n\n{rules}"
     );
+    if let Some(note) = start_note.filter(|t| !t.trim().is_empty()) {
+        out.push_str("\n\n");
+        out.push_str(note.trim());
+    }
     if let Some(text) = instructions.filter(|t| !t.trim().is_empty()) {
         out.push_str("\n\nThe folder's own instructions (from its AGENTS.md or CLAUDE.md):\n\n");
         out.push_str(text.trim());
@@ -698,8 +719,42 @@ pub fn processes(ctx: &Ctx, args: &Value) -> files::Outcome {
             }
         }
         (_, None) => fail("Give the process's id.".into()),
-        (other, _) => fail(format!("Unknown action {other}: use list, read or stop.")),
+        (other, _) => fail(format!("Unknown action {other}: use list, read, wait or stop.")),
     }
+}
+
+/// The processes tool's wait: until the process ends, prints `until`, or
+/// `seconds` pass. None: the reply was stopped.
+pub async fn wait_process(ctx: &Ctx, args: &Value, token: &tokio_util::sync::CancellationToken) -> Option<files::Outcome> {
+    let fail = |t: String| Some(files::Outcome { text: t, error: true, detail: None });
+    let Some(id) = args.get("id").and_then(Value::as_u64).map(|n| n as u32) else { return fail("Give the process's id.".into()) };
+    let Some((output, state)) = shell::Processes::global().handle(&ctx.chat_id, id) else { return fail(format!("There's no process {id} in this session.")) };
+    let secs = args.get("seconds").and_then(Value::as_u64).unwrap_or(120).clamp(1, 600);
+    let until = str_arg(args, "until").to_string();
+    let mark = output.lock().unwrap().mark();
+    let started = std::time::Instant::now();
+    let why = loop {
+        if let Some(code) = *state.lock().unwrap() {
+            break format!("Process {id} ended (exit code {}).", code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".into()));
+        }
+        if !until.is_empty() && output.lock().unwrap().since(mark).contains(&until) {
+            break format!("Process {id} printed \"{until}\" and is still running.");
+        }
+        if started.elapsed().as_secs() >= secs {
+            break format!("Process {id} is still running after {secs} s of waiting.");
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
+            _ = token.cancelled() => return None,
+        }
+    };
+    let max = args.get("lines").and_then(Value::as_u64).unwrap_or(4000).clamp(100, 30_000) as usize;
+    let new = output.lock().unwrap().since(mark);
+    let n = new.chars().count();
+    let new: String = if n > max { new.chars().skip(n - max).collect() } else { new };
+    let text = if new.trim().is_empty() { format!("{why} No new output.") } else { format!("{why} New output:
+{}", new.trim_end()) };
+    Some(files::Outcome { text, error: false, detail: None })
 }
 
 /// Runs an agent tool: its answer, whether it failed, and its card's detail.
@@ -849,12 +904,18 @@ pub fn git_dirty(folder: &Path) -> Option<usize> {
     git(folder, &["status", "--porcelain"]).ok().map(|t| t.lines().filter(|l| !l.trim().is_empty()).count())
 }
 
-/// "Commit first": everything as it is, in one work-in-progress commit,
-/// before a session starts changing things. Returns the commit's short id.
-pub fn git_commit_wip(folder: &Path) -> Result<String, String> {
-    git(folder, &["add", "-A"])?;
-    git(folder, &["commit", "-m", "Work in progress, before a Relay session"])?;
-    Ok(git(folder, &["rev-parse", "--short", "HEAD"])?.trim().to_string())
+/// What the model hears about the folder as the session starts: uncommitted
+/// changes in its repository, which the user may want committed before the
+/// agent's changes mix in with theirs.
+pub fn start_note(folder: &Path, mode: &str) -> Option<String> {
+    let n = git_dirty(folder).filter(|n| *n > 0)?;
+    let what = if n == 1 { "1 uncommitted change".to_string() } else { format!("{n} uncommitted changes") };
+    let then = if mode == "auto" || mode == "bypass" {
+        "Don't commit them yourself; if your work will touch the same files, say so at the end."
+    } else {
+        "Before you change files, ask the user whether they'd like those committed first (so your changes stay separate from theirs), unless the task makes it clear."
+    };
+    Some(format!("When this session started, the folder's git repository had {what} (work the user hasn't committed). {then}"))
 }
 
 /// A small text file (HEAD, a `.git` file): at most 4 KB.
@@ -868,6 +929,14 @@ fn read_small(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_agent_tool_asks_for_a_plain_explanation() {
+        for (name, _, schema) in tool_specs(true) {
+            assert_eq!(schema["required"][0], "description", "{name}");
+            assert!(schema["properties"]["description"]["description"].as_str().unwrap().contains("plain words"), "{name}");
+        }
+    }
 
     fn ctx() -> Ctx {
         let folder = paths::real(&std::env::temp_dir().join("relay-judge-test"));

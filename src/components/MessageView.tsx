@@ -25,7 +25,8 @@ import { memo, useEffect, useRef, useState } from "react";
 import { AGENT_SERVER, HOSTED_SERVER, partsOf, SKILLS_SERVER, WEB_SERVER, type Message, type Part } from "../lib/api";
 import { spring } from "../lib/motion";
 import { shortModel, useActiveModel, useStore } from "../lib/store";
-import { fullTime, seconds, sentAgo, useNow } from "../lib/time";
+import { revealed } from "../lib/reveal";
+import { duration, fullTime, seconds, sentAgo, useNow } from "../lib/time";
 import { AgentToolCard } from "./AgentCards";
 import { MessageFiles } from "./Attachments";
 import { wantsSend } from "./Composer";
@@ -115,22 +116,33 @@ function EditBox({ message, onDone }: { message: Message; onDone: () => void }) 
 function AssistantMessage({ message, busy }: { message: Message; busy: boolean }) {
   const streaming = message.status === "streaming";
   const parts = partsOf(message);
-  const waiting = streaming && parts.length === 0;
+  const reveal = useStore((s) => s.settings?.reveal ?? "token");
+  // The live text, as much of it as the reveal setting shows yet.
+  const liveText = (text: string) => (reveal === "token" ? text : revealed(text, reveal));
+  const lastPart = parts[parts.length - 1];
+  const hiddenAll = streaming && reveal !== "token" && lastPart?.type === "text" && lastPart.text.trim() !== "" && !liveText(lastPart.text).trim();
+  const waiting = streaming && (parts.length === 0 || hiddenAll);
   const showStats = useStore((s) => s.settings?.showStats ?? true);
   // Continue: only the last reply on screen, and only one that didn't finish
   // but has something to go on from.
   const last = useStore((s) => s.current?.leafId === message.id);
   const unfinished = message.status === "stopped" || message.status === "error" || message.stats?.finishReason === "length";
   const canContinue = last && unfinished && (parts.length > 0 || !!message.content);
-  // Only the newest to-do list of a reply shows whole.
-  const lastTodo = parts.reduce((n, p, i) => (p.type === "tool" && p.tool === "todo" ? i : n), -1);
   return (
     <div className={`msg msg-assistant ${streaming ? "streaming" : ""}`}>
       {parts.map((p, i) => {
         const last = i === parts.length - 1;
-        if (p.type === "reasoning") return <Reasoning key={i} text={p.text} live={streaming && last && !!message.thinking} ms={p.ms ?? null} />;
-        if (p.type === "text") return <Markdown key={i} text={p.text} streaming={streaming && last} />;
-        return <ToolCard key={p.id} part={p} messageId={message.id} stale={p.tool === "todo" && i < lastTodo} />;
+        if (p.type === "reasoning") {
+          const live = streaming && last && !!message.thinking;
+          // Thinking shows as it comes even when answers appear all at once.
+          return <Reasoning key={i} text={live && reveal !== "whole" ? liveText(p.text) : p.text} live={live} ms={p.ms ?? null} />;
+        }
+        if (p.type === "text") {
+          if (!(streaming && last)) return <Markdown key={i} text={p.text} streaming={false} />;
+          const shown = liveText(p.text);
+          return shown.trim() ? <Markdown key={i} text={shown} streaming /> : null;
+        }
+        return <ToolCard key={p.id} part={p} messageId={message.id} />;
       })}
       {waiting && <Waiting />}
       {message.status === "error" && (
@@ -331,8 +343,8 @@ function toolFace(part: ToolPart): { icon: React.ReactNode; name: string; server
   }
 }
 
-function ToolCard({ part, messageId, stale }: { part: ToolPart; messageId: string; stale?: boolean }) {
-  if (part.serverId === AGENT_SERVER) return <AgentToolCard part={part} messageId={messageId} stale={stale} />;
+function ToolCard({ part, messageId }: { part: ToolPart; messageId: string }) {
+  if (part.serverId === AGENT_SERVER) return <AgentToolCard part={part} messageId={messageId} />;
   return <OtherToolCard part={part} messageId={messageId} />;
 }
 
@@ -423,8 +435,11 @@ function SentAgo({ ms }: { ms: number }) {
 
 function Meta({ message }: { message: Message }) {
   const s = message.stats;
+  const agent = useStore((st) => st.current?.kind === "agent");
   const parts: string[] = [];
   if (message.model) parts.push(shortModel(message.model));
+  // How long an agent worked on it (the title bar showed it ticking).
+  if (agent && s?.totalMs && s.totalMs >= 1000) parts.push(`worked ${duration(s.totalMs)}`);
   if (s?.tokensPerSec) parts.push(`${s.tokensPerSec.toFixed(s.tokensPerSec < 10 ? 1 : 0)} tok/s`);
   if (s?.completionTokens) parts.push(`${s.estimated ? "~" : ""}${s.completionTokens.toLocaleString()} tokens`);
   if (s?.ttftMs != null) parts.push(`${seconds(s.ttftMs)} to first token`);

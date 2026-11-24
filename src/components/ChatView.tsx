@@ -4,6 +4,7 @@ import { ArrowDown, Paperclip, Plug } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { reveal, rowSpring, spring } from "../lib/motion";
 import { useStore, useView } from "../lib/store";
+import { TodoFloat } from "./AgentCards";
 import { Composer } from "./Composer";
 import { MessageView } from "./MessageView";
 import { Button, Empty } from "./ui";
@@ -51,6 +52,7 @@ export function ChatView() {
   return (
     <div className="chat-view">
       {loading ? <div className="messages" /> : <Messages key={current!.id} streaming={streaming} />}
+      {!loading && <TodoFloat />}
       <div className="dock">
         <Composer chatId={currentId} streaming={streaming} />
       </div>

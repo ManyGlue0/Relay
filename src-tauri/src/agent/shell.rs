@@ -145,6 +145,20 @@ impl Output {
         t.chars().skip(n - max).collect()
     }
 
+    /// How much has come out so far, dropped bytes included: a mark for `since`.
+    pub fn mark(&self) -> usize {
+        self.dropped + self.text.len()
+    }
+
+    /// What came out after a `mark` (what's still kept of it), cleaned.
+    pub fn since(&self, mark: usize) -> String {
+        let mut at = mark.saturating_sub(self.dropped).min(self.text.len());
+        while !self.text.is_char_boundary(at) {
+            at += 1;
+        }
+        clean(&self.text[at..])
+    }
+
     /// For the model: the start and the end when it's long.
     pub fn for_model(&self) -> String {
         let t = clean(&self.text);
@@ -441,6 +455,14 @@ impl Processes {
         Some((text, st.is_none(), st.flatten(), p.started.elapsed().as_secs_f64()))
     }
 
+    /// A process's output and state, to wait on.
+    #[allow(clippy::type_complexity)]
+    pub fn handle(&self, session: &str, id: u32) -> Option<(Arc<Mutex<Output>>, Arc<Mutex<Option<Option<i32>>>>)> {
+        let map = self.by_session.lock().unwrap();
+        let p = map.get(session)?.iter().find(|p| p.id == id)?;
+        Some((p.output.clone(), p.state.clone()))
+    }
+
     /// Stops a process (and everything it started). False: no such process.
     pub fn stop(&self, session: &str, id: u32) -> bool {
         let mut map = self.by_session.lock().unwrap();
@@ -477,6 +499,19 @@ mod tests {
         big.push(&vec![b'a'; KEEP + 100]);
         assert_eq!(big.dropped, 100);
         assert!(big.for_model().contains("characters cut"));
+    }
+
+    #[test]
+    fn since_a_mark_survives_dropped_output() {
+        let mut o = Output::default();
+        o.push(b"before ");
+        let mark = o.mark();
+        o.push(b"after");
+        assert_eq!(o.since(mark), "after");
+        o.push(&vec![b'x'; KEEP]);
+        // What came after the mark was partly dropped: the rest of it is still there.
+        assert_eq!(o.since(mark).len(), KEEP);
+        assert_eq!(o.since(o.mark()), "");
     }
 
     #[tokio::test]

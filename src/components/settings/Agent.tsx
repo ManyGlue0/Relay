@@ -1,7 +1,9 @@
-import { FolderClosed, X } from "lucide-react";
+import { FolderClosed, Pencil, X } from "lucide-react";
+import { useState } from "react";
 import { api } from "../../lib/api";
 import { folderName } from "../../lib/folder";
 import { useStore } from "../../lib/store";
+import { AutoAccessSheet } from "../AutoAccess";
 import { IconButton, Stepper, Toggle } from "../ui";
 import { Group, Page, Row } from "./kit";
 
@@ -10,6 +12,7 @@ import { Group, Page, Row } from "./kit";
 export function Agent() {
   const s = useStore((st) => st.settings);
   const update = useStore((st) => st.updateSettings);
+  const [editing, setEditing] = useState<string | null>(null);
   if (!s) return null;
   const folders = Object.entries(s.folders ?? {}).filter(([, f]) => f.autoPush || f.allowSecrets.length > 0);
 
@@ -30,8 +33,8 @@ export function Agent() {
         </Row>
       </Group>
 
-      <Group title="Folders" hint="What Auto may do there, set from the composer">
-        {folders.length === 0 && <Row label="No folder has its own settings yet" hint="In Auto, the folder chip has &quot;Auto may push and publish&quot;, and Manage lets hidden secrets through" />}
+      <Group title="Folders" hint="What Auto may do there, beyond its rules">
+        {folders.length === 0 && <Row label="No folder has its own settings yet" hint="In an Auto session, the shield in the title bar lets Auto push and publish there, or lets hidden secrets through" />}
         {folders.map(([key, f]) => (
           <Row
             key={key}
@@ -43,6 +46,9 @@ export function Agent() {
             }
             hint={[f.autoPush ? "Auto may push and publish" : "", f.allowSecrets.length ? `Secrets let through: ${f.allowSecrets.join(", ")}` : ""].filter(Boolean).join(" · ")}
           >
+            <IconButton size="small" label="Change what Auto may do here" onClick={() => setEditing(key)}>
+              <Pencil size={14} />
+            </IconButton>
             <IconButton
               size="small"
               label="Forget this folder's settings"
@@ -59,6 +65,16 @@ export function Agent() {
           </Row>
         ))}
       </Group>
+      {editing && (
+        <AutoAccessSheet
+          folder={editing}
+          open
+          onClose={() => {
+            setEditing(null);
+            void api.getSettings().then((settings) => useStore.setState({ settings }));
+          }}
+        />
+      )}
     </Page>
   );
 }

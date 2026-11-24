@@ -715,10 +715,14 @@ fn prepare(core: &Core, chat: &crate::db::Chat, history: &[Message], provider_id
             None => {
                 let text = crate::agent::read_instructions(&ctx.folder);
                 core.db.set_instructions(&chat.summary.id, &text)?;
+                // The folder as the session starts, said once and kept the same way.
+                let note = crate::agent::start_note(&ctx.folder, ctx.mode(core));
+                core.db.set_start_note(&chat.summary.id, note.as_deref())?;
                 text
             }
         };
-        let block = crate::agent::prompt(&ctx.folder.to_string_lossy(), ctx.mode(core), Some(&instructions));
+        let start_note = core.db.start_note(&chat.summary.id)?;
+        let block = crate::agent::prompt(&ctx.folder.to_string_lossy(), ctx.mode(core), Some(&instructions), start_note.as_deref());
         system = if system.is_empty() { block } else { format!("{block}\n\n{system}") };
     }
     if let Some(block) = skills::prompt_block(&skills) {
@@ -758,9 +762,7 @@ fn prepare(core: &Core, chat: &crate::db::Chat, history: &[Message], provider_id
     }
     let context = provider.contexts.get(model).copied().filter(|c| *c > 0);
     // The last reply's request plus its answer: what the next request starts from.
-    let used = history.iter().rev().find(|m| m.role == "assistant" && m.stats.is_some()).and_then(|m| m.stats.as_ref()).map(|s| {
-        s.get("promptTokens").and_then(Value::as_u64).unwrap_or(0) + s.get("completionTokens").and_then(Value::as_u64).unwrap_or(0)
-    });
+    let used = history.iter().rev().find(|m| m.role == "assistant" && m.stats.is_some()).and_then(|m| m.stats.as_ref()).and_then(context_of);
     // Not again right after a summary that didn't bring it down (the system
     // prompt and tools may fill most of a small context on their own).
     let just_summarized = history.iter().rev().find(|m| m.role == "assistant").and_then(|m| m.parts.as_ref()).is_some_and(|p| p.to_string().contains("\"tool\":\"summarize\""));
@@ -971,6 +973,14 @@ pub fn continue_reply(app: &AppHandle, chat_id: &str, message_id: &str) -> Resul
     tauri::async_runtime::spawn(job.run());
     crate::holster::publish(app);
     Ok(())
+}
+
+/// The context a reply left: its last request plus that request's answer
+/// (`contextTokens`). Replies from before it was recorded have only the last
+/// request (`promptTokens`), next to every round's answers added up, which
+/// were mostly in that request already.
+pub(crate) fn context_of(stats: &Value) -> Option<u64> {
+    stats.get("contextTokens").and_then(Value::as_u64).or_else(|| stats.get("promptTokens").and_then(Value::as_u64))
 }
 
 /// A continued reply's stats: time and tokens of both parts added up.
@@ -1528,7 +1538,16 @@ impl Job {
             }
             (!cancelled).then_some(out)
         } else if tool == "processes" {
-            let mut out = crate::agent::processes(ctx, args);
+            let out = if args.get("action").and_then(Value::as_str) == Some("wait") {
+                crate::agent::wait_process(ctx, args, &self.token).await
+            } else {
+                Some(crate::agent::processes(ctx, args))
+            };
+            let Some(mut out) = out else {
+                set_tool_state(part, "error", Some("Stopped".into()), Some(t0.elapsed().as_millis() as u64));
+                tr.set_tool(part.clone());
+                return None;
+            };
             if mode == "auto" {
                 let (_, masks) = crate::agent::auto_env(&core_arc(&self.app), ctx);
                 out.text = crate::agent::mask(&out.text, &masks);
@@ -1567,6 +1586,8 @@ impl Job {
         let mut gen_secs = 0.0f64;
         let mut prompt_tokens: Option<u64> = None;
         let mut completion_tokens: u64 = 0;
+        // The last round's request plus its answer: the context the next request starts from.
+        let mut context_tokens: Option<u64> = None;
         let mut have_usage = false;
         let mut finish: Option<String> = None;
         let mut outcome: Result<End, String> = Ok(End::Done);
@@ -1738,7 +1759,10 @@ impl Job {
                 // The last round's prompt is the whole conversation: that's the context in use.
                 prompt_tokens = Some(p);
                 completion_tokens += c;
+                context_tokens = Some(p + c);
                 have_usage = true;
+                // The composer's meter follows the reply round by round.
+                let _ = self.app.emit("chat-context", json!({ "chatId": self.chat_id, "tokens": p + c }));
             }
             // A paused round and the one continuing it are one turn: their blocks go back together.
             let blocks = round_native.take();
@@ -1965,6 +1989,7 @@ impl Job {
             "totalMs": ended.duration_since(started).as_millis() as u64,
             "promptTokens": prompt_tokens,
             "completionTokens": completion_tokens,
+            "contextTokens": context_tokens,
             "estimated": !have_usage,
             "tokensPerSec": if gen_secs > 0.05 && completion_tokens > 0 { Some(completion_tokens as f64 / gen_secs) } else { None },
             "finishReason": finish,
@@ -2211,6 +2236,16 @@ mod tests {
         let flat = history_messages(&h[..2], History::default());
         assert_eq!(flat.len(), 2);
         assert!(flat[1]["content"].as_str().unwrap().contains("[Called read (fs)"));
+    }
+
+    #[test]
+    fn context_is_the_last_request_and_its_answer() {
+        // Every round's answers added up are mostly inside the last request already.
+        let s = json!({ "promptTokens": 190_000, "completionTokens": 153_000, "contextTokens": 190_400 });
+        assert_eq!(context_of(&s), Some(190_400));
+        let old = json!({ "promptTokens": 190_000, "completionTokens": 153_000 });
+        assert_eq!(context_of(&old), Some(190_000));
+        assert_eq!(context_of(&json!({})), None);
     }
 
     #[test]

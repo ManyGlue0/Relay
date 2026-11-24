@@ -1,6 +1,6 @@
 # Agent mode
 
-Status: **built** (all nine steps of the build order, and Settings → Agent). Target: Relay 0.7.0. Written 2026-11-23 from a
+Status: **built** (all nine steps of the build order, Settings → Agent, and the first round of feedback: plain-language step titles, the floating to-do list, the title bar's Auto shield, waiting on processes, the working timer and the reveal setting). Target: Relay 0.7.0. Written 2026-11-23 from a
 question-and-answer design session with Andrea and two review rounds; the first
 six open questions were answered the same day. What's still open is listed at
 the end.
@@ -393,9 +393,11 @@ file tool, a command, a script.
 In a git repository:
 
 - The session header shows the branch.
-- **Checkpoint commit:** when a session starts on a repository with uncommitted
-  changes, Ask modes offer "Commit first" (a WIP commit). Auto never commits on
-  its own unless asked in the prompt.
+- **Uncommitted work:** when a session starts on a repository with uncommitted
+  changes, the model is told (once, kept in the prompt) and asks whether to
+  commit them first. Auto never commits them; it mentions it. (A composer
+  note offering "Commit first" came first; the composer shouldn't change, and
+  the model is the one who knows when it matters.)
 - **See all changes:** a diff of the working tree against the session's start.
 - Git's own history isn't checkpointed (`.git` is skipped); destructive git is
   refused in Auto instead.
@@ -461,8 +463,8 @@ Each step ends in something Andrea can test on its own.
    shown as the divider; another summary waits until the conversation has
    grown halfway from there to the end of the context.)
 9. **Git and background:** branch, checkpoint commit, see all changes,
-   notifications for approvals. (Built: "Commit first" is a composer note
-   before a session's first message in Ask modes; "All changes" is a view of
+   notifications for approvals. (Built: the model hears about uncommitted
+   changes as the session starts and asks; "All changes" is a view of
    the files panel, each file's diff from the session's first checkpoint;
    approvals and questions send a Holster notification when Relay isn't in
    front and turn the sidebar's dot amber. A session's first checkpoint is

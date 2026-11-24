@@ -19,6 +19,8 @@ export function highlight(code: string, lang: string) {
   const name = ALIASES[lang] ?? lang;
   try {
     const tree = name && lowlight.registered(name) ? lowlight.highlight(name, code) : lowlight.highlightAuto(code, { subset: AUTO });
+    // Guessing found no language (a file tree, plain notes): the tree comes back empty.
+    if (tree.children.length === 0) return code;
     return toJsxRuntime(tree, { Fragment, jsx, jsxs });
   } catch {
     return code;

@@ -192,6 +192,27 @@ textarea:focus-visible {
 *:hover::-webkit-scrollbar-thumb {
   background-color: var(--border-strong);
 }
+/* Boxes inside cards keep a visible scrollbar: you can tell there's more. */
+.terminal::-webkit-scrollbar-thumb,
+.diff-scroll::-webkit-scrollbar-thumb,
+.cmd-line::-webkit-scrollbar-thumb,
+.tool-result::-webkit-scrollbar-thumb,
+.tool-args::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--text-3) 45%, transparent);
+}
+.terminal:hover::-webkit-scrollbar-thumb,
+.diff-scroll:hover::-webkit-scrollbar-thumb,
+.cmd-line:hover::-webkit-scrollbar-thumb,
+.tool-result:hover::-webkit-scrollbar-thumb,
+.tool-args:hover::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--text-3) 80%, transparent);
+}
+.terminal::-webkit-scrollbar-thumb {
+  background-color: rgba(216, 216, 222, 0.28);
+}
+.terminal:hover::-webkit-scrollbar-thumb {
+  background-color: rgba(216, 216, 222, 0.5);
+}
 ::-webkit-scrollbar-track,
 ::-webkit-scrollbar-corner {
   background: transparent;
@@ -298,6 +319,14 @@ body.resizing .titlebar-title {
 }
 .title-meta svg + .title-meta-text + svg {
   margin-left: 6px;
+}
+.work-timer {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 6px;
+  color: var(--accent-ink);
+  font-variant-numeric: tabular-nums;
 }
 .titlebar-title .title-meta-text {
   font-size: 12px;
@@ -1113,8 +1142,11 @@ body.resizing .titlebar-title {
   text-align: left;
   transition: background 0.12s ease;
 }
-.tool-head:hover {
+.tool-head:hover:not(.still) {
   background: var(--hover);
+}
+.tool-head.still {
+  cursor: default;
 }
 .tool-well {
   flex: none;
@@ -1220,6 +1252,26 @@ body.resizing .titlebar-title {
 .agent-card .tool-name {
   min-width: 0;
 }
+/* The model's words for a step, as its title; the path after it, quieter. */
+.tool-title {
+  min-width: 0;
+  flex: 0 1 auto;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tool-sub {
+  min-width: 0;
+  flex: 0 10 auto;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .diff-stat {
   flex: none;
   display: inline-flex;
@@ -1273,7 +1325,7 @@ body.resizing .titlebar-title {
   overflow: hidden;
 }
 .diff-scroll {
-  max-height: 420px;
+  max-height: 320px;
   overflow: auto;
   padding: 4px 0;
 }
@@ -1318,18 +1370,6 @@ body.resizing .titlebar-title {
   padding: 2px 0 2px 74px;
   font-size: 12px;
   color: var(--text-3);
-}
-.diff-more {
-  display: block;
-  width: 100%;
-  padding: 6px 0;
-  border-top: 1px solid var(--border);
-  font-size: 12px;
-  color: var(--text-2);
-}
-.diff-more:hover {
-  background: var(--hover);
-  color: var(--text);
 }
 .diff-cut {
   padding: 4px 12px 8px;
@@ -1675,10 +1715,138 @@ body.resizing .titlebar-title {
   font-size: 12px;
   color: var(--text-3);
 }
+/* The list itself floats at the chat's top right, clear of the scrollbar. */
+.todo-float-wrap {
+  position: absolute;
+  top: 12px;
+  right: 22px;
+  z-index: 5;
+  display: flex;
+  justify-content: flex-end;
+  pointer-events: none;
+}
+.todo-float,
+.todo-chip {
+  pointer-events: auto;
+  transform-origin: top right;
+  border: 1px solid var(--border);
+  background: var(--sheet-bg);
+  box-shadow: var(--shadow-pop);
+}
+.todo-float {
+  width: 280px;
+  max-height: min(420px, 50vh);
+  overflow-y: auto;
+  border-radius: 14px;
+}
+.todo-float-head {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 38px;
+  padding: 0 6px 0 12px;
+  background: var(--sheet-bg);
+}
+.todo-float-icon {
+  color: var(--accent-ink);
+}
+.todo-float-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.todo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 11px;
+  border-radius: 15px;
+  color: var(--accent-ink);
+  cursor: pointer;
+}
+.todo-chip:hover {
+  background: var(--surface-strong);
+}
 
-/* Commands: the line asked about, and the output terminal style. */
-.cmd-line {
+/* What Auto may do in a folder: the title bar shield's sheet. */
+.access-group {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.access-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+}
+.access-row + .access-row {
+  border-top: 1px solid var(--border);
+}
+.access-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: var(--accent-ink);
+  background: var(--accent-bg);
+}
+.access-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.access-label {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.access-label.mono {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.access-hint {
+  font-size: 12px;
+  color: var(--text-3);
+}
+.access-title {
+  margin: 16px 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.access-intro {
+  margin: 0 0 8px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.access-none {
+  padding: 12px;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+
+/* Commands: the whole command line, and the output terminal style. */
+.cmd-block {
   margin: 0 10px 8px;
+}
+.cmd-shell {
+  margin: 2px 0 4px 2px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-3);
+}
+.cmd-line {
+  margin: 0;
+  max-height: 240px;
+  overflow: auto;
   padding: 8px 10px;
   border-radius: 9px;
   background: var(--code-bg);
@@ -4220,27 +4388,6 @@ body.resizing .titlebar-title {
 .composer-note svg {
   flex: none;
 }
-.secrets-note {
-  color: var(--text-2);
-}
-.secrets-names {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.note-link {
-  flex: none;
-  padding: 0;
-  border: 0;
-  background: none;
-  font: inherit;
-  color: var(--accent-ink);
-  cursor: pointer;
-}
-.note-link:hover {
-  text-decoration: underline;
-}
 .ability:disabled {
   opacity: 0.5;
 }
@@ -4334,11 +4481,6 @@ button.summary-divider:hover .summary-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* "Commit first" in the composer. */
-.git-note {
-  color: var(--text-2);
 }
 
 /* Settings → Agent: a folder's row. */

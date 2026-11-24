@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { api, type HolsterStatus } from "../../lib/api";
 import { useStore } from "../../lib/store";
 import { TitleModelPicker } from "../ModelPicker";
-import { Button, Dot, Segmented, Stepper, Toggle } from "../ui";
+import { Button, Dot, Segmented, Select, Stepper, Toggle } from "../ui";
 import { ConfirmButton, Group, Page, Row } from "./kit";
 
 export function General() {
@@ -68,6 +68,19 @@ export function General() {
             <TitleModelPicker value={s.titleModel} onPick={(titleModel) => void update({ titleModel })} />
           </Row>
         )}
+        <Row label="Show replies" hint="How the answer appears as it's written. Thinking and tool steps always show live">
+          <Select
+            value={s.reveal ?? "token"}
+            onChange={(reveal) => void update({ reveal })}
+            width={190}
+            options={[
+              { value: "token", label: "Word by word", hint: "As the model writes, the default" },
+              { value: "sentence", label: "Sentence by sentence", hint: "Each sentence once it's complete" },
+              { value: "paragraph", label: "Paragraph by paragraph", hint: "Each paragraph once it's complete" },
+              { value: "whole", label: "All at once", hint: "The whole answer when it's done" },
+            ]}
+          />
+        </Row>
         <Row label="Show reasoning while the model thinks" hint="It folds away once the answer starts; you can always open it again">
           <Toggle label="Show reasoning while the model thinks" on={s.expandThinking} onChange={(expandThinking) => void update({ expandThinking })} />
         </Row>

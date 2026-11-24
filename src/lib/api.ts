@@ -1,3 +1,4 @@
+import type { Reveal } from "./reveal";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -28,6 +29,7 @@ export interface Settings {
   autoTitles: boolean;
   sendKey: "enter" | "ctrl-enter";
   expandThinking: boolean;
+  reveal: Reveal;
   showStats: boolean;
   defaultModel: ModelRef | null;
   defaultEffort: Effort;
@@ -287,6 +289,8 @@ export interface MessageStats {
   totalMs?: number;
   promptTokens?: number | null;
   completionTokens?: number;
+  /** The last round's request plus its answer: the context the next message starts from. */
+  contextTokens?: number | null;
   estimated?: boolean;
   tokensPerSec?: number | null;
   finishReason?: string | null;
@@ -607,8 +611,6 @@ export const api = {
   processes: (chatId: string) => invoke<ProcessView[]>("agent_processes", { chatId }),
   blocked: (chatId: string) => invoke<BlockedStep[]>("agent_blocked", { chatId }),
   allChanges: (chatId: string) => invoke<FileChange[]>("agent_all_changes", { chatId }),
-  gitDirty: (folder: string) => invoke<number | null>("agent_git_dirty", { folder }),
-  gitCommit: (folder: string) => invoke<string>("agent_git_commit", { folder }),
   runBlocked: (chatId: string, at: number) => invoke<BlockedStep>("agent_run_blocked", { chatId, at }),
   clearBlocked: (chatId: string) => invoke<void>("agent_clear_blocked", { chatId }),
   folderSettings: (folder: string) => invoke<FolderSettings>("agent_folder_settings", { folder }),

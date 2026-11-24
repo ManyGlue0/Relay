@@ -571,7 +571,7 @@ fn tool_specs(core: &Core, agent: Option<&str>, skills: &[Skill], web: bool, mcp
         own.extend(crate::agent::tool_specs(core.prefs.get().agent_cmd));
     }
     if agent.is_some() || mcp {
-        own.extend(crate::agent::interact_specs(!matches!(agent, Some("auto" | "bypass"))));
+        own.extend(crate::agent::interact_specs());
     }
     {
         for (tool, description, schema) in own {

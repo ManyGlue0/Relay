@@ -134,8 +134,7 @@ function AssistantMessage({ message, busy }: { message: Message; busy: boolean }
         const last = i === parts.length - 1;
         if (p.type === "reasoning") {
           const live = streaming && last && !!message.thinking;
-          // Thinking shows as it comes even when answers appear all at once.
-          return <Reasoning key={i} text={live && reveal !== "whole" ? liveText(p.text) : p.text} live={live} ms={p.ms ?? null} />;
+          return <Reasoning key={i} text={live ? liveText(p.text) : p.text} live={live} ms={p.ms ?? null} />;
         }
         if (p.type === "text") {
           if (!(streaming && last)) return <Markdown key={i} text={p.text} streaming={false} />;

@@ -129,11 +129,11 @@ fn explained(schema: &mut Value) {
     }
 }
 
-/// Asking the user and the to-do list: in Agent sessions (asking only where
-/// someone is there to answer: not in Auto or Bypass) and in chats with tools on.
-pub fn interact_specs(ask: bool) -> Vec<(&'static str, String, Value)> {
+/// Asking the user and the to-do list: in Agent sessions, in every mode (the
+/// mode only changes what needs an OK, never the tools), and in chats with tools on.
+pub fn interact_specs() -> Vec<(&'static str, String, Value)> {
     let mut out = Vec::new();
-    if ask {
+    {
         out.push((
             "ask_user",
             "Asks the user one to four questions, each with two to four options to pick from (they can also write their own answer), and waits for the answers. \
@@ -311,8 +311,8 @@ fn file_specs() -> Vec<(&'static str, &'static str, Value)> {
 pub fn prompt(folder: &str, mode: &str, instructions: Option<&str>, start_note: Option<&str>) -> String {
     let rules = match mode {
         "edits" => "File changes in the folder run right away; commands and anything outside the folder wait for the user's OK.",
-        "auto" => "Auto mode: the user isn't watching and nothing waits for them. Steps the rules don't allow are refused with a reason: don't try another way to do the same thing, carry on with the rest. Don't stop to ask questions: decide sensibly, and at the end list what was blocked, the questions you'd have asked and the assumptions you made.",
-        "bypass" => "Bypass mode: your tool calls run without asking. Be careful: nothing stops a mistake (every change in the folder can still be undone by the user). Don't stop to ask questions: decide sensibly, and at the end list the questions you'd have asked and the assumptions you made.",
+        "auto" => "Auto mode: steps run without waiting for the user's OK. Steps the rules don't allow are refused with a reason: don't try another way to do the same thing, carry on with the rest. Ask the user (ask_user) when a decision is really theirs; for small things decide sensibly. At the end, list what was blocked and the assumptions you made.",
+        "bypass" => "Bypass mode: your tool calls run without asking. Be careful: nothing stops a mistake (every change in the folder can still be undone by the user). Ask the user (ask_user) when a decision is really theirs; for small things decide sensibly, and list the assumptions you made at the end.",
         _ => "Each change and command waits for the user's OK. If they decline, ask what they'd like instead or carry on with something else.",
     };
     let mut out = format!(
@@ -737,8 +737,9 @@ pub async fn wait_process(ctx: &Ctx, args: &Value, token: &tokio_util::sync::Can
         if let Some(code) = *state.lock().unwrap() {
             break format!("Process {id} ended (exit code {}).", code.map(|c| c.to_string()).unwrap_or_else(|| "unknown".into()));
         }
-        if !until.is_empty() && output.lock().unwrap().since(mark).contains(&until) {
-            break format!("Process {id} printed \"{until}\" and is still running.");
+        // Everything it printed counts: the text may have come before the wait.
+        if !until.is_empty() && output.lock().unwrap().since(0).contains(&until) {
+            break format!("Process {id} has printed \"{until}\" and is still running.");
         }
         if started.elapsed().as_secs() >= secs {
             break format!("Process {id} is still running after {secs} s of waiting.");
@@ -749,11 +750,21 @@ pub async fn wait_process(ctx: &Ctx, args: &Value, token: &tokio_util::sync::Can
         }
     };
     let max = args.get("lines").and_then(Value::as_u64).unwrap_or(4000).clamp(100, 30_000) as usize;
-    let new = output.lock().unwrap().since(mark);
+    let (new, recent) = {
+        let out = output.lock().unwrap();
+        (out.since(mark), out.tail(max))
+    };
     let n = new.chars().count();
     let new: String = if n > max { new.chars().skip(n - max).collect() } else { new };
-    let text = if new.trim().is_empty() { format!("{why} No new output.") } else { format!("{why} New output:
-{}", new.trim_end()) };
+    let text = if !new.trim().is_empty() {
+        format!("{why} New output:
+{}", new.trim_end())
+    } else if !recent.trim().is_empty() {
+        format!("{why} Nothing new while waiting; its recent output:
+{}", recent.trim_end())
+    } else {
+        format!("{why} No output.")
+    };
     Some(files::Outcome { text, error: false, detail: None })
 }
 
@@ -929,6 +940,30 @@ fn read_small(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn waiting_sees_text_printed_before_the_wait() {
+        let c = ctx();
+        let _ = std::fs::create_dir_all(&c.folder);
+        let run = shell::start(shell::Shell::PowerShell, "Write-Output READY; Start-Sleep -Seconds 30", &c.folder, &Vec::new()).unwrap();
+        let procs = shell::Processes::global();
+        let (id, out) = procs.adopt(&c.chat_id, shell::Shell::PowerShell, "test", run);
+        // READY is out before anyone waits.
+        let t0 = std::time::Instant::now();
+        while !out.lock().unwrap().tail(100).contains("READY") && t0.elapsed().as_secs() < 20 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let token = tokio_util::sync::CancellationToken::new();
+        let t1 = std::time::Instant::now();
+        let got = wait_process(&c, &json!({ "action": "wait", "id": id, "until": "READY", "seconds": 20 }), &token).await.unwrap();
+        assert!(t1.elapsed().as_secs() < 3, "waited {:?}", t1.elapsed());
+        assert!(got.text.contains("has printed \"READY\"") && got.text.contains("READY
+") || got.text.ends_with("READY"), "{}", got.text);
+        // No until: it runs out of time and says so.
+        let got = wait_process(&c, &json!({ "action": "wait", "id": id, "seconds": 1 }), &token).await.unwrap();
+        assert!(got.text.contains("still running after 1 s"), "{}", got.text);
+        procs.stop(&c.chat_id, id);
+    }
 
     #[test]
     fn every_agent_tool_asks_for_a_plain_explanation() {

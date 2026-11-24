@@ -68,16 +68,15 @@ export function General() {
             <TitleModelPicker value={s.titleModel} onPick={(titleModel) => void update({ titleModel })} />
           </Row>
         )}
-        <Row label="Show replies" hint="How the answer appears as it's written. Thinking and tool steps always show live">
+        <Row label="Show replies" hint="How answers appear while they're written">
           <Select
-            value={s.reveal ?? "token"}
+            value={s.reveal === "sentence" || s.reveal === "paragraph" ? s.reveal : "token"}
             onChange={(reveal) => void update({ reveal })}
-            width={190}
+            width={170}
             options={[
-              { value: "token", label: "Word by word", hint: "As the model writes, the default" },
-              { value: "sentence", label: "Sentence by sentence", hint: "Each sentence once it's complete" },
-              { value: "paragraph", label: "Paragraph by paragraph", hint: "Each paragraph once it's complete" },
-              { value: "whole", label: "All at once", hint: "The whole answer when it's done" },
+              { value: "token", label: "Word by word" },
+              { value: "sentence", label: "By sentence" },
+              { value: "paragraph", label: "By paragraph" },
             ]}
           />
         </Row>

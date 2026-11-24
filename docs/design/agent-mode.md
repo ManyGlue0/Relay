@@ -94,7 +94,7 @@ Agent tools live on a new route server `relay.agent` / `Agent` (like
 | `agent__cmd` | Runs a command in cmd.exe. A setting, **off by default** (small models trip on cmd's escaping, and three shells confuse them). |
 | `agent__processes` | Background processes: list, read recent output, stop. |
 | `agent__todo` | The session's to-do list: the model writes and ticks steps; shown in the chat. |
-| `agent__ask_user` | Questions with options (Relay's AskUserQuestion). Not offered in Auto or Bypass. |
+| `agent__ask_user` | Questions with options (Relay's AskUserQuestion). In every mode. |
 
 - Each shell tool says which shell it is in its description; the model picks
   the tool, never a shell parameter.
@@ -142,8 +142,10 @@ while nothing happened. So Relay knows which models call tools:
 - Shows as a card in the chat and **pauses the reply** until answered (like a
   tool approval). The answers go back as the tool's result.
 - Also offered in **Chat** mode when tools are on (it's useful everywhere).
-- In Auto and Bypass it isn't offered: the model lists its open questions and
-  the assumptions it made in its final message.
+- In every mode: the mode only changes what needs an OK, never which tools the
+  model has. (At first it was left out in Auto and Bypass; the user expects it
+  there too.) In Auto and Bypass the model asks only when a decision is really
+  the user's, and lists its assumptions at the end.
 
 ## Permission modes
 

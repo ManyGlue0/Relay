@@ -24,7 +24,7 @@ pub struct Settings {
     /// Reasoning shows open while the model thinks, then folds away.
     pub expand_thinking: bool,
     /// How a reply's text appears while it streams: "token" (as it comes),
-    /// "sentence", "paragraph" or "whole" (when it's done). Display only.
+    /// "sentence" or "paragraph". Display only.
     pub reveal: String,
     /// Speed and token counts under each reply.
     pub show_stats: bool,

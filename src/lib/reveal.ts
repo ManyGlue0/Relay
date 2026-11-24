@@ -1,6 +1,6 @@
 /** How a reply's text appears while it streams (Settings → General). The
  *  server always streams; this only changes what's on screen. */
-export type Reveal = "token" | "sentence" | "paragraph" | "whole";
+export type Reveal = "token" | "sentence" | "paragraph";
 
 /** A run of these ends a sentence: "Done.", "Hello!!!", "Really?!", "No thanks...". */
 const END = /[.!?…。！？]/;
@@ -10,8 +10,7 @@ const CLOSE = /[)\]"'”’»*_`]/;
 /** The part of a streaming text that's ready to show: up to the last whole
  *  sentence or paragraph. Code blocks show a line at a time either way. */
 export function revealed(text: string, mode: Reveal): string {
-  if (mode === "token") return text;
-  if (mode === "whole") return "";
+  if (mode !== "sentence" && mode !== "paragraph") return text;
   let cut = 0;
   let fenced = false;
   let lineStart = 0;

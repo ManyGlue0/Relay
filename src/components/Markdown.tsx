@@ -126,9 +126,39 @@ export function normalizeMath(md: string): string {
 const remarkPlugins = [remarkGfm, [remarkMath, { singleDollarTextMath: true }]] as never;
 const rehypePlugins = [[rehypeKatex, { throwOnError: false, strict: "ignore" }]] as never;
 
-const Block = memo(function Block({ text }: { text: string }) {
+type HastNode = { type: string; value?: string; tagName?: string; properties?: { className?: unknown }; children?: HastNode[] };
+const NO_FADE = new Set(["pre", "code", "script", "style"]);
+
+/** While a reply streams, each word is its own span: a word that's new
+ *  mounts, and fades in (earlier ones keep their place, so they don't again).
+ *  Code and math stay whole (they fade in as a piece, by CSS). */
+function rehypeFadeWords() {
+  const walk = (node: HastNode) => {
+    if (!node.children) return;
+    if (node.type === "element" && NO_FADE.has(node.tagName ?? "")) return;
+    const cls = node.properties?.className;
+    if (Array.isArray(cls) && cls.some((c) => /math|katex/.test(String(c)))) return;
+    const out: HastNode[] = [];
+    for (const child of node.children) {
+      if (child.type !== "text") {
+        walk(child);
+        out.push(child);
+        continue;
+      }
+      for (const piece of (child.value ?? "").split(/(\s+)/)) {
+        if (!piece) continue;
+        out.push(/^\s+$/.test(piece) ? { type: "text", value: piece } : { type: "element", tagName: "span", properties: { className: ["fade-in"] }, children: [{ type: "text", value: piece }] });
+      }
+    }
+    node.children = out;
+  };
+  return (tree: HastNode) => walk(tree);
+}
+const liveRehypePlugins = [rehypeFadeWords, [rehypeKatex, { throwOnError: false, strict: "ignore" }]] as never;
+
+const Block = memo(function Block({ text, live }: { text: string; live?: boolean }) {
   return (
-    <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components}>
+    <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={live ? liveRehypePlugins : rehypePlugins} components={components}>
       {text}
     </ReactMarkdown>
   );
@@ -173,9 +203,9 @@ export const Markdown = memo(function Markdown({ text, streaming }: { text: stri
   }
   const blocks = splitBlocks(md);
   return (
-    <div className="md">
+    <div className="md live">
       {blocks.map((b, i) => (
-        <Block key={i} text={b} />
+        <Block key={i} text={b} live />
       ))}
     </div>
   );

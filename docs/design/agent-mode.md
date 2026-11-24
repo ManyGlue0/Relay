@@ -1,6 +1,6 @@
 # Agent mode
 
-Status: **being built** (steps 1 to 8 of the build order are done). Target: Relay 0.7.0. Written 2026-11-23 from a
+Status: **built** (all nine steps of the build order are done; an Agent section in Settings is still to come). Target: Relay 0.7.0. Written 2026-11-23 from a
 question-and-answer design session with Andrea and two review rounds; the first
 six open questions were answered the same day. What's still open is listed at
 the end.
@@ -461,7 +461,12 @@ Each step ends in something Andrea can test on its own.
    shown as the divider; another summary waits until the conversation has
    grown halfway from there to the end of the context.)
 9. **Git and background:** branch, checkpoint commit, see all changes,
-   notifications for approvals.
+   notifications for approvals. (Built: "Commit first" is a composer note
+   before a session's first message in Ask modes; "All changes" is a view of
+   the files panel, each file's diff from the session's first checkpoint;
+   approvals and questions send a Holster notification when Relay isn't in
+   front and turn the sidebar's dot amber. A session's first checkpoint is
+   its own, never shared with another session's, so it's a true baseline.)
 
 ## Decided after the first draft
 

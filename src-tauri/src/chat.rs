@@ -1266,6 +1266,15 @@ fn drop_old_outputs(messages: &mut [Value]) -> bool {
 }
 
 impl Job {
+    /// The reply waits for the user (or stops waiting): the sidebar marks the
+    /// chat, and Holster says so when Relay isn't in front.
+    fn waiting(&self, on: bool, what: &str) {
+        let _ = self.app.emit("chat-waiting", json!({ "chatId": self.chat_id, "waiting": on }));
+        if on {
+            crate::holster::waiting(&self.app, &self.chat_id, what);
+        }
+    }
+
     /// Summarizes the session (shown as a "Summarized here" part) and goes on
     /// from the summary: before the new message (`keep_user`), or in place of
     /// the whole conversation, mid-reply. On failure the messages stay as they were.
@@ -1359,10 +1368,13 @@ impl Job {
             set_tool_state(part, "question", None, None);
             tr.set_tool(part.clone());
             let t0 = Instant::now();
+            let first = questions.pointer("/0/question").and_then(Value::as_str).unwrap_or("").to_string();
+            self.waiting(true, &format!("A question for you: {first}"));
             let answer = match core.streams.wait_for(&self.message_id, part_id(part)) {
                 Some(rx) => tokio::select! {
                     d = rx => d.ok(),
                     _ = self.token.cancelled() => {
+                        self.waiting(false, "");
                         set_tool_state(part, "denied", None, None);
                         tr.set_tool(part.clone());
                         return None;
@@ -1370,6 +1382,7 @@ impl Job {
                 },
                 None => None,
             };
+            self.waiting(false, "");
             let answers: Option<Value> = answer.as_deref().and_then(|a| serde_json::from_str(a).ok()).filter(Value::is_array);
             let text = crate::agent::answers_text(&questions, answers.as_ref());
             set_detail(part, Some(json!({ "questions": questions, "answers": answers })));
@@ -1431,6 +1444,11 @@ impl Job {
                 set_detail(part, Some(detail));
                 set_tool_state(part, "approval", None, None);
                 tr.set_tool(part.clone());
+                let what = match args.get("command").and_then(Value::as_str) {
+                    Some(c) => format!("Wants to run: {c}"),
+                    None => format!("Wants to {} {}", tool.replace('_', " "), args.get("path").and_then(Value::as_str).unwrap_or("")),
+                };
+                self.waiting(true, what.trim());
                 let decision = match core.streams.wait_for(&self.message_id, part_id(part)) {
                     Some(rx) => tokio::select! {
                         d = rx => d.unwrap_or_else(|_| "deny".into()),
@@ -1438,6 +1456,7 @@ impl Job {
                     },
                     None => "deny".into(),
                 };
+                self.waiting(false, "");
                 match decision.as_str() {
                     "cancel" => {
                         set_tool_state(part, "denied", None, None);
@@ -1840,6 +1859,7 @@ impl Job {
                 if !allowed {
                     set_tool_state(&mut part, "approval", None, None);
                     tr.set_tool(part.clone());
+                    self.waiting(true, &format!("Wants to use {} ({})", route.tool, route.server));
                     let decision = match core.streams.wait_for(&self.message_id, id) {
                         Some(rx) => tokio::select! {
                             d = rx => d.unwrap_or_else(|_| "deny".into()),
@@ -1847,6 +1867,7 @@ impl Job {
                         },
                         None => "deny".into(),
                     };
+                    self.waiting(false, "");
                     if decision == "always" && builtin {
                         if let Some(id) = skills::id_of(&core, &script_skill) {
                             skills::set_flags(&core, &id, None, Some(true));

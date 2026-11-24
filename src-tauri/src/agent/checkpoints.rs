@@ -135,8 +135,9 @@ pub fn take(st: &Store, chat_id: &str, folder: &Path, message_id: &str, call_id:
         }
         rows.push(FileRow { path: rel.clone(), hash, size: *size, mtime: *mtime });
     }
-    // Nothing changed since the last one: steps share it.
-    if let Some((id, prev)) = &last {
+    // Nothing changed since the last one: this session's steps share it (a
+    // session's first checkpoint is its own: its baseline for "All changes").
+    if let Some((id, prev)) = last.as_ref().filter(|(id, _)| st.db.checkpoints_of(chat_id).is_ok_and(|own| own.iter().any(|c| c.id == *id))) {
         if prev.len() == rows.len() {
             let before: HashMap<&str, &str> = prev.iter().map(|r| (r.path.as_str(), r.hash.as_str())).collect();
             if rows.iter().all(|r| before.get(r.path.as_str()) == Some(&r.hash.as_str())) {
@@ -402,6 +403,33 @@ pub fn changes(st: &Store, chat_id: &str, folder: &Path) -> Result<Changes, Stri
     Ok(Changes { files, big: now.too_big, none: false })
 }
 
+/// Every change since the session started, as diffs: each file from its
+/// copy in the session's first checkpoint to now. Binary files and files
+/// whose copy is gone get a note instead of a diff.
+pub fn all_changes(st: &Store, chat_id: &str, folder: &Path) -> Result<Vec<serde_json::Value>, String> {
+    let list = changes(st, chat_id, folder)?;
+    let fid = folder_id(folder);
+    let base: HashMap<String, String> = match st.db.checkpoints_of(chat_id)?.into_iter().find(|c| c.folder == fid) {
+        Some(first) => st.db.checkpoint_files(first.id)?.into_iter().map(|r| (r.path, r.hash)).collect(),
+        None => HashMap::new(),
+    };
+    let mut out = Vec::new();
+    for c in list.files.iter().take(500) {
+        let old = match (c.kind.as_str(), base.get(&c.path)) {
+            ("created", _) => Some(String::new()),
+            (_, Some(hash)) => read_version(st, folder, hash).ok().map(|b| super::files::decode(&b)).unwrap_or(None),
+            _ => None,
+        };
+        let now = if c.kind == "deleted" { Some(String::new()) } else { std::fs::read(folder.join(&c.path)).ok().and_then(|b| super::files::decode(&b)) };
+        let entry = match (old, now) {
+            (Some(o), Some(n)) => serde_json::json!({ "path": c.path, "kind": c.kind, "diff": super::diff::lines(&o.replace("\r\n", "\n"), &n.replace("\r\n", "\n")) }),
+            _ => serde_json::json!({ "path": c.path, "kind": c.kind, "note": "Not text, or its first version is no longer stored." }),
+        };
+        out.push(entry);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,6 +440,24 @@ mod tests {
         let folder = base.join("project");
         std::fs::create_dir_all(folder.join("src")).unwrap();
         (folder, base.join("store"))
+    }
+
+    #[test]
+    fn sessions_dont_share_checkpoints() {
+        let db = Db::memory();
+        let (folder, root) = dirs("share");
+        std::fs::write(folder.join("a.txt"), "one").unwrap();
+        let st = Store { db: &db, root: root.clone(), cap: 1 << 20, budget: 1 << 30 };
+        let a1 = take(&st, "a", &folder, "m", "c1", "x").unwrap();
+        assert_eq!(take(&st, "a", &folder, "m", "c2", "x").unwrap(), a1, "nothing changed: the same session shares");
+        let b1 = take(&st, "b", &folder, "m", "c3", "x").unwrap();
+        assert_ne!(b1, a1, "another session starts with its own");
+        std::fs::write(folder.join("new.txt"), "two").unwrap();
+        let c = changes(&st, "b", &folder).unwrap();
+        assert_eq!(c.files.iter().map(|f| (f.path.as_str(), f.kind.as_str())).collect::<Vec<_>>(), vec![("new.txt", "created")]);
+        let all = all_changes(&st, "b", &folder).unwrap();
+        assert_eq!(all[0]["diff"]["added"], 1);
+        let _ = std::fs::remove_dir_all(folder.parent().unwrap());
     }
 
     #[test]

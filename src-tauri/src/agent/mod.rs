@@ -824,6 +824,39 @@ fn head_name(head: &str) -> Option<String> {
     (head.len() >= 7 && head.chars().all(|c| c.is_ascii_hexdigit())).then(|| head[..7].to_string())
 }
 
+fn git(folder: &Path, args: &[&str]) -> Result<String, String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C").arg(folder).args(args).env("GIT_TERMINAL_PROMPT", "0").stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd.output().map_err(|e| format!("git didn't start: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    if out.status.success() {
+        Ok(text)
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        Err(if err.is_empty() { text.trim().to_string() } else { err })
+    }
+}
+
+/// How many uncommitted changes a folder's repository has (None: not a
+/// repository, or no git).
+pub fn git_dirty(folder: &Path) -> Option<usize> {
+    git_branch(folder)?;
+    git(folder, &["status", "--porcelain"]).ok().map(|t| t.lines().filter(|l| !l.trim().is_empty()).count())
+}
+
+/// "Commit first": everything as it is, in one work-in-progress commit,
+/// before a session starts changing things. Returns the commit's short id.
+pub fn git_commit_wip(folder: &Path) -> Result<String, String> {
+    git(folder, &["add", "-A"])?;
+    git(folder, &["commit", "-m", "Work in progress, before a Relay session"])?;
+    Ok(git(folder, &["rev-parse", "--short", "HEAD"])?.trim().to_string())
+}
+
 /// A small text file (HEAD, a `.git` file): at most 4 KB.
 fn read_small(path: &Path) -> Option<String> {
     use std::io::Read;

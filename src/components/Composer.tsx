@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { AnimatePresence, motion } from "framer-motion";
-import { BookMarked, ChevronDown, CircleAlert, FilePen, FolderClosed, FolderOpen, Globe, Hand, KeyRound, Mic, Paperclip, Plug, Plus, RefreshCw, ShieldCheck, ShieldOff, SlidersHorizontal, Square, Upload, X, type LucideIcon } from "lucide-react";
+import { BookMarked, ChevronDown, CircleAlert, FilePen, FolderClosed, FolderOpen, GitCommitHorizontal, Globe, Hand, KeyRound, Mic, Paperclip, Plug, Plus, RefreshCw, ShieldCheck, ShieldOff, SlidersHorizontal, Square, Upload, X, type LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, errorText, type AgentMode, type FolderSettings } from "../lib/api";
 import { folderName, useFolderInfo } from "../lib/folder";
@@ -108,6 +108,7 @@ export function Composer({ chatId, streaming }: { chatId: string | null; streami
       />
       {agent && <NoToolsNote />}
       {agent && <SecretsNote />}
+      {agent && <GitNote />}
       <div className="composer-bar">
         <PlusMenu />
         {agent && <FolderChip />}
@@ -492,6 +493,46 @@ function NoToolsNote() {
     <div className="composer-note">
       <CircleAlert size={13} />
       <span>{shortModel(model!.model)} can't call tools, so it can't read or change files here. Pick another model.</span>
+    </div>
+  );
+}
+
+/** Before a session starts in a repository with uncommitted changes, Ask
+ *  modes offer a work-in-progress commit first (Auto never commits on its own). */
+function GitNote() {
+  const mode = useMode();
+  const fresh = useStore((s) => !s.current || s.current.messages.length === 0);
+  const folder = useStore((s) => (s.current ? s.current.folder : (s.draftOptions.folder ?? null)));
+  const [dirty, setDirty] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  const asks = mode === "ask" || mode === "edits";
+  useEffect(() => {
+    if (!fresh || !asks || !folder) return setDirty(null);
+    let live = true;
+    void api.gitDirty(folder).then((n) => live && setDirty(n)).catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [fresh, asks, folder]);
+  if (!fresh || !asks || !folder || !dirty) return null;
+  const commit = () => {
+    setBusy(true);
+    void api
+      .gitCommit(folder)
+      .then((id) => {
+        setDirty(0);
+        useStore.getState().toast(`Committed as ${id}: the session starts from a clean repository`);
+      })
+      .catch((e) => useStore.getState().toast(errorText(e)))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <div className="composer-note git-note">
+      <GitCommitHorizontal size={13} />
+      <span className="secrets-names">{dirty === 1 ? "This repository has 1 uncommitted change." : `This repository has ${dirty} uncommitted changes.`}</span>
+      <button className="note-link" disabled={busy} onClick={commit} title="Commits everything as it is (git add -A, then a work-in-progress commit)">
+        {busy ? "Committing…" : "Commit first"}
+      </button>
     </div>
   );
 }

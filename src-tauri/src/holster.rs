@@ -207,6 +207,16 @@ pub fn publish(app: &AppHandle) {
 
 /// A reply finished. If Relay isn't in front, say so through Holster.
 pub fn reply_finished(app: &AppHandle, chat_id: &str, content: &str) {
+    notify(app, chat_id, "Reply ready", &plain_snippet(content, 220));
+}
+
+/// A reply waits for the user (an approval, a question). If Relay isn't in
+/// front, say so through Holster.
+pub fn waiting(app: &AppHandle, chat_id: &str, what: &str) {
+    notify(app, chat_id, "Waiting for you", &clip(what, 220));
+}
+
+fn notify(app: &AppHandle, chat_id: &str, fallback: &str, body: &str) {
     let Some(core) = app.try_state::<Arc<Core>>() else { return };
     let prefs = core.prefs.get();
     if HOLSTER.get().is_none() || crate::window::is_active() || !(prefs.notify_on_reply || prefs.holster_glow) {
@@ -220,8 +230,8 @@ pub fn reply_finished(app: &AppHandle, chat_id: &str, content: &str) {
     let title = core.db.chat_summary(chat_id).ok().flatten().map(|c| c.title).filter(|t| !t.is_empty());
     let card = json!({
         "id": card_id(chat_id),
-        "title": clip(title.as_deref().unwrap_or("Reply ready"), 120),
-        "body": plain_snippet(content, 220),
+        "title": clip(title.as_deref().unwrap_or(fallback), 120),
+        "body": body,
         "buttons": [{ "id": "open", "label": "Open", "primary": true, "open": true }],
         "timeout": 12,
     });

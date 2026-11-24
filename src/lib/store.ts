@@ -91,6 +91,8 @@ interface State {
   filesPanel: boolean;
   /** Bumped when a session's blocked list changes (`agent-blocked`). */
   blockedSeq: number;
+  /** Chats whose reply waits for the user (an approval, a question). */
+  waiting: Record<string, boolean>;
   /** Checkpoints pruning made unrestorable, by id (for the step cards). */
   collapsed: Record<number, true>;
 
@@ -190,6 +192,7 @@ export const useStore = create<State>((set, get) => ({
   files: {},
   filesPanel: false,
   blockedSeq: 0,
+  waiting: {},
   collapsed: {},
 
   async probeProviders() {

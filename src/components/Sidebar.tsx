@@ -274,6 +274,7 @@ function ArchivedGroup({ chats }: { chats: ChatSummary[] }) {
 function ChatRow({ chat }: { chat: ChatSummary }) {
   const active = useStore((s) => s.currentId === chat.id && !s.settingsOpen);
   const streaming = useStore((s) => !!s.streaming[chat.id]);
+  const waiting = useStore((s) => !!s.waiting[chat.id]);
   const [menu, setMenu] = useState<Anchor | null>(null);
   const [renaming, setRenaming] = useState(false);
   /** Deleting: first the session, then its workspace (one Relay made) or its checkpoints. */
@@ -349,7 +350,7 @@ function ChatRow({ chat }: { chat: ChatSummary }) {
     >
       {active && <Pill layoutId="chat-pill" className="row-pill" />}
       {renaming ? <Rename chat={chat} onDone={() => setRenaming(false)} /> : <span className="chat-title">{chat.title || (session ? "New session" : "New chat")}</span>}
-      {streaming && <span className="live-dot" aria-label="Replying" />}
+      {streaming && <span className={`live-dot ${waiting ? "asks" : ""}`} aria-label={waiting ? "Waiting for you" : "Replying"} title={waiting ? "Waiting for you" : undefined} />}
       {!renaming && (
         <button
           ref={more}

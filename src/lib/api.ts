@@ -97,6 +97,13 @@ export type ToolDecision = "once" | "always" | "deny" | "edits";
 
 /** An Agent session's permission mode. */
 export type AgentMode = "ask" | "edits" | "auto" | "bypass";
+/** One file's change since the session started (`note` when there's no diff). */
+export interface FileChange {
+  path: string;
+  kind: "created" | "changed" | "deleted";
+  diff?: Diff;
+  note?: string;
+}
 /** A step Auto refused, kept in the session's blocked list. */
 export interface BlockedStep {
   tool: string;
@@ -591,6 +598,9 @@ export const api = {
   checkpoints: (chatId: string) => invoke<Checkpoint[]>("agent_checkpoints", { chatId }),
   processes: (chatId: string) => invoke<ProcessView[]>("agent_processes", { chatId }),
   blocked: (chatId: string) => invoke<BlockedStep[]>("agent_blocked", { chatId }),
+  allChanges: (chatId: string) => invoke<FileChange[]>("agent_all_changes", { chatId }),
+  gitDirty: (folder: string) => invoke<number | null>("agent_git_dirty", { folder }),
+  gitCommit: (folder: string) => invoke<string>("agent_git_commit", { folder }),
   runBlocked: (chatId: string, at: number) => invoke<BlockedStep>("agent_run_blocked", { chatId, at }),
   clearBlocked: (chatId: string) => invoke<void>("agent_clear_blocked", { chatId }),
   folderSettings: (folder: string) => invoke<FolderSettings>("agent_folder_settings", { folder }),

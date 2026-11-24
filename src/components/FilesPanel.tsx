@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { ChevronRight, ExternalLink, FileMinus2, FilePen, FilePlus2, GitCompareArrows, RefreshCw, RotateCcw, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { api, errorText, type Changes, type Diff, type FileVersion } from "../lib/api";
+import { api, errorText, type Changes, type Diff, type FileChange, type FileVersion } from "../lib/api";
 import { spring } from "../lib/motion";
 import { useStore } from "../lib/store";
 import { fileSize } from "../lib/media";
@@ -17,6 +17,9 @@ export function FilesPanel() {
   const streaming = useStore((s) => (chat ? !!s.streaming[chat.id] : false));
   const [changes, setChanges] = useState<Changes | null>(null);
   const [busy, setBusy] = useState(false);
+  /** "All changes": every file's diff since the session started. */
+  const [all, setAll] = useState<FileChange[] | null>(null);
+  const [showAll, setShowAll] = useState(false);
   const chatId = chat?.id;
 
   const load = useCallback(async () => {
@@ -24,12 +27,13 @@ export function FilesPanel() {
     setBusy(true);
     try {
       setChanges(await api.sessionChanges(chatId));
+      setAll(showAll ? await api.allChanges(chatId) : null);
     } catch (e) {
       useStore.getState().toast(errorText(e));
     } finally {
       setBusy(false);
     }
-  }, [chatId]);
+  }, [chatId, showAll]);
 
   // Fresh when opened, when the session changes, and when a reply ends.
   useEffect(() => {
@@ -48,8 +52,11 @@ export function FilesPanel() {
         >
           <div className="files-inner">
             <div className="files-head">
-              <span className="files-title">Files</span>
+              <span className="files-title">{showAll ? "All changes" : "Files"}</span>
               <span className="files-fill" />
+              <IconButton size="small" label={showAll ? "Back to the files" : "All changes since the session started, as diffs"} active={showAll} onClick={() => setShowAll(!showAll)}>
+                <GitCompareArrows size={14} />
+              </IconButton>
               <IconButton size="small" label="Refresh" onClick={() => void load()} disabled={busy}>
                 <RefreshCw size={14} className={busy ? "spin" : ""} />
               </IconButton>
@@ -61,9 +68,9 @@ export function FilesPanel() {
               {changes && changes.files.length === 0 && (
                 <div className="files-empty">{changes.none ? "Nothing changed yet. Files the session creates, changes or deletes show up here." : "Everything is as it was when the session started."}</div>
               )}
-              {changes?.files.map((f) => (
-                <FileRow key={f.path} chatId={chat.id} path={f.path} kind={f.kind} versions={f.versions} onChanged={load} locked={streaming} />
-              ))}
+              {showAll
+                ? all?.map((f) => <AllChangesFile key={f.path} change={f} />)
+                : changes?.files.map((f) => <FileRow key={f.path} chatId={chat.id} path={f.path} kind={f.kind} versions={f.versions} onChanged={load} locked={streaming} />)}
               {changes && changes.big.length > 0 && (
                 <div className="files-big">
                   <div className="files-big-head">Not protected (too big for checkpoints)</div>
@@ -80,6 +87,28 @@ export function FilesPanel() {
         </motion.aside>
       )}
     </AnimatePresence>
+  );
+}
+
+/** One file in "All changes": its kind, its path, its diff since the session started. */
+function AllChangesFile({ change }: { change: FileChange }) {
+  const K = KIND[change.kind];
+  const d = change.diff;
+  return (
+    <div className="files-all-file">
+      <div className="files-all-head" title={`${K.label}: ${change.path}`}>
+        <K.icon size={14} className="files-kind" />
+        <span className="files-name">{change.path}</span>
+        <span className="files-fill" />
+        {d && (
+          <span className="diff-stat">
+            {d.added > 0 && <span className="add">+{d.added}</span>}
+            {d.removed > 0 && <span className="del">−{d.removed}</span>}
+          </span>
+        )}
+      </div>
+      {d ? d.hunks.length > 0 ? <DiffView rows={d.hunks} truncated={d.truncated} /> : <div className="files-none">Empty file.</div> : <div className="files-none">{change.note}</div>}
+    </div>
   );
 }
 

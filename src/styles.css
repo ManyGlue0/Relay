@@ -4310,3 +4310,33 @@ button.summary-divider:hover .summary-label {
 
   color: var(--text);
 }
+
+/* A reply waiting for the user: the sidebar's dot turns amber and stays lit. */
+.live-dot.asks {
+  background: var(--warn);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 22%, transparent);
+  animation: none;
+}
+
+/* The files panel's "All changes" view. */
+.files-all-file {
+  margin-bottom: 12px;
+}
+.files-all-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 2px 6px;
+  font-size: 12.5px;
+  min-width: 0;
+}
+.files-all-head .files-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* "Commit first" in the composer. */
+.git-note {
+  color: var(--text-2);
+}

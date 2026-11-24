@@ -139,8 +139,12 @@ while nothing happened. So Relay knows which models call tools:
 
 - One to four questions, each with two to four options (label and a short
   description), single or multiple choice, and an "Other" field.
-- Shows as a card in the chat and **pauses the reply** until answered (like a
-  tool approval). The answers go back as the tool's result.
+- **Pauses the reply** until answered (like a tool approval). You answer in a
+  panel docked above the composer: a tab per question (its header, a ✓ once
+  answered), then Submit with a recap. "Other" is an option with its own text
+  box, sent only when picked. In the chat it's a line while it waits, then a
+  card with each question and your answer. The answers go back as the tool's
+  result.
 - Also offered in **Chat** mode when tools are on (it's useful everywhere).
 - In every mode: the mode only changes what needs an OK, never which tools the
   model has. (At first it was left out in Auto and Bypass; the user expects it

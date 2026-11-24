@@ -121,7 +121,7 @@ function Questions({ messageId, part }: { messageId: string; part: ToolPart }) {
     >
       <div className="qdock-head">
         <span className="qdock-icon">
-          <MessageCircleQuestion size={15} />
+          <MessageCircleQuestion size={16} />
         </span>
         <span className="qdock-title">{qs.length === 1 ? "A question for you" : `${qs.length} questions for you`}</span>
       </div>
@@ -130,7 +130,7 @@ function Questions({ messageId, part }: { messageId: string; part: ToolPart }) {
           <button key={i} role="tab" aria-selected={tab === i} className={`qdock-tab ${tab === i ? "on" : ""}`} onClick={() => setTab(i)}>
             {tab === i && <Pill layoutId={`qtab-${part.id}`} className="segmented-pill" />}
             <span className="qdock-tab-label">
-              {answered(list[i]) ? <Check size={12} strokeWidth={3} className="qdock-done" /> : <span className="qdock-num">{i + 1}</span>}
+              {answered(list[i]) && <Check size={12} strokeWidth={3} className="qdock-done" />}
               {q.header || `Question ${i + 1}`}
             </span>
           </button>
@@ -210,7 +210,6 @@ function QuestionTab({
   onEnter: () => void;
   otherInput: React.RefObject<HTMLInputElement | null>;
 }) {
-  const mark = q.multiple ? "qm-box" : "qm-dot";
   return (
     <div className="qdock-question">
       <div className="qdock-text">{q.question}</div>
@@ -220,7 +219,7 @@ function QuestionTab({
           const on = draft.picked.includes(o.label);
           return (
             <button key={o.label} className={`question-option ${on ? "on" : ""}`} onClick={() => onPick(o.label)} aria-pressed={on}>
-              <span className={`question-mark ${mark}`}>{on && <Check size={11} strokeWidth={3} />}</span>
+              <Mark multiple={q.multiple} on={on} />
               <span className="question-option-text">
                 <span className="question-label">{o.label}</span>
                 {o.description && <span className="question-desc">{o.description}</span>}
@@ -230,7 +229,7 @@ function QuestionTab({
           );
         })}
         <div className={`question-option qdock-other ${draft.otherOn ? "on" : ""}`} onClick={onOther} role="button" aria-pressed={draft.otherOn}>
-          <span className={`question-mark ${mark}`}>{draft.otherOn && <Check size={11} strokeWidth={3} />}</span>
+          <Mark multiple={q.multiple} on={draft.otherOn} />
           <input
             ref={otherInput}
             className="qdock-other-input"
@@ -249,5 +248,18 @@ function QuestionTab({
         </div>
       </div>
     </div>
+  );
+}
+
+/** A radio's dot or a checkbox's tick, drawn on a 16 px grid so both sit dead center. */
+function Mark({ multiple, on }: { multiple: boolean; on: boolean }) {
+  return (
+    <span className={`question-mark ${multiple ? "qm-box" : "qm-dot"}`}>
+      {on && multiple && (
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
+          <path d="M4.5 8.25 7 10.75 11.5 5.75" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      )}
+    </span>
   );
 }

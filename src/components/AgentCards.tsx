@@ -286,21 +286,22 @@ function QuestionCard({ part }: { part: ToolPart }) {
     );
   }
   return (
-    <div className="question-recap">
-      <div className="question-line">
-        <MessageCircleQuestion size={13} />
-        <span>{given === null ? "Asked you (skipped)" : part.status === "denied" ? "Asked you (stopped)" : "Asked you"}</span>
+    <div className="tool-card question-card">
+      <div className="question-head">
+        <span className="tool-well">
+          <MessageCircleQuestion size={14} />
+        </span>
+        <span className="tool-verb">Asked you</span>
       </div>
-      {given !== null && part.status !== "denied" && (
-        <ul className="question-recap-list">
-          {qs.map((q, i) => (
-            <li key={i}>
-              <span className="question-recap-q">{q.question}</span>
-              <span className="question-recap-a">{answerText(given?.[i]) ?? "…"}</span>
-            </li>
-          ))}
-        </ul>
-      )}
+      {qs.map((q, i) => (
+        <div key={i} className="question">
+          <div className="question-text">
+            {q.header && <span className="question-tag">{q.header}</span>}
+            {q.question}
+          </div>
+          <div className="question-answer">{answerText(given?.[i]) ?? (given === null ? "Skipped" : part.status === "denied" ? "Stopped" : "…")}</div>
+        </div>
+      ))}
     </div>
   );
 }

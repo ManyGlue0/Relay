@@ -24,6 +24,7 @@
 
 ## Highlights
 
+- **Agent mode.** Give a model a folder and a task: it reads and edits files, runs commands in PowerShell or Git Bash, keeps a to-do list and asks you when a decision is yours. Every step explains itself in plain words, and every change can be undone. You choose how much it does alone, from asking before each change to Auto, where each command is checked before it runs and risky ones are refused.
 - **Any OpenAI-compatible endpoint, and Anthropic's own API.** Ollama, LM Studio, llama.cpp, vLLM, OpenAI, OpenRouter, or your own server. Add it once with its address, test the connection, and its models show up in the picker. A server with more models than you want (LM Studio) can show only the ones you pick. Each provider shows its service's logo, or an icon or image you choose.
 - **Claude, natively.** Providers set to *Anthropic* use the Messages API: Claude's thinking shows as a readable summary, signed thinking and web search results carry over between messages, and the conversation stays in Anthropic's prompt cache (5 minutes or an hour, your choice).
 - **Web search, for every model.** One switch per chat. Claude on Anthropic's API uses Anthropic's own web search and page reading; every other model gets Relay's (services that copy Anthropic's API too): DuckDuckGo results and pages read as text, no key or account needed.
@@ -91,6 +92,16 @@ The address can be pasted the way the service's docs give it: the base address (
 
 Endpoints that don't list their models can still be used: add model ids by hand in the provider's **Models** list. Relay detects each model's context window where the server says it (llama.cpp, LM Studio, Ollama, vLLM, OpenRouter); you can also set it by hand.
 
+## Agent mode
+
+Switch to **Agent** in the title bar. A session works in one folder: pick it with the folder chip in the composer, or leave it empty and Relay makes a workspace for it. The session reads the folder's `AGENTS.md` (or `CLAUDE.md`) and follows it. The model needs to call tools; models that can't carry a "no tools" badge.
+
+- **What it does.** Reads, writes, edits and deletes files in the folder; searches them; runs commands (PowerShell always, Git Bash when installed, cmd.exe if you turn it on in Settings → Agent), in the background too, like a dev server, with the title bar showing what's running. Each step is a card titled with what it does; open it for the exact command and its output, or the changed lines.
+- **Modes**, from the chip next to the model (`Shift+Tab` cycles): **Ask every time** (each change waits for your OK, diff in front of you), **Accept edits** (changes in the folder just happen; commands still ask), **Auto** (nothing waits: commands, the scripts they start and the Python they run are checked, and steps that could lose something, like deleting files, destructive git, uploads or reading keys, are refused with a reason; "Blocked" in the title bar lists them, each with *Run it now*), and **Bypass** (everything runs, except reading keys and passwords). The shield in Auto's title bar lets a folder allow `git push` or a secret variable.
+- **Undo anything.** Before every step Relay records the folder's files. Any step's card has *Restore to before this*, the files panel shows what the session created, changed or deleted, each file's versions, and all changes as diffs.
+- **It asks, it keeps a list.** When a choice is yours, the model asks up to four questions above the message box, a tab each. For longer work it keeps a to-do list floating over the chat.
+- **Long sessions.** Near the end of the model's context, it writes a summary of the work so far and carries on from it; a *Summarized here* divider shows where.
+
 ## Tools (MCP)
 
 In **Settings → Tools**, add a server:
@@ -156,7 +167,8 @@ A build of your own doesn't update itself; [docs/RELEASING.md](docs/RELEASING.md
 
 - Built with [Tauri](https://tauri.app), [React](https://react.dev), [Framer Motion](https://motion.dev), [Lucide](https://lucide.dev) icons, [KaTeX](https://katex.org), [highlight.js](https://highlightjs.org) (through lowlight), [react-markdown](https://github.com/remarkjs/react-markdown) and [rusqlite](https://github.com/rusqlite/rusqlite).
 - Tools speak the [Model Context Protocol](https://modelcontextprotocol.io); skills follow the [Agent Skills](https://agentskills.io) format.
-- The frameless acrylic window and the taskbar fix come from [Track](https://github.com/ManyGlue0/Track), by the same author.
+- The frameless acrylic window and the taskbar fix come from [Track](https://github.com/ManyGlue0/Track), and the updater from [Holster](https://github.com/ManyGlue0/Holster), by the same author.
+- Agent mode's diffs are made with [similar](https://github.com/mitsuhiko/similar) (Apache-2.0); checkpoints store files by SHA-256 ([RustCrypto](https://github.com/RustCrypto/hashes)).
 - PDFs are drawn with [pdf.js](https://github.com/mozilla/pdf.js) (Apache-2.0), including its JBIG2, OpenJPEG and qcms decoders, whose licenses ship with the app; PDF text is read with [pdf-extract](https://github.com/jrmuizel/pdf-extract) (MIT).
 - Telling money from math (`$5` vs `$x$`) follows the rule [Pandoc](https://pandoc.org) uses for TeX math.
 - Provider logos come from [LobeHub Icons](https://github.com/lobehub/lobe-icons) (MIT), re-framed to sit centered. The logos and names are trademarks of their owners (OpenAI, Anthropic, SpaceX, OpenRouter, Ollama, LM Studio, vLLM); Relay uses them only to show which service a provider is, and isn't affiliated with any of them.

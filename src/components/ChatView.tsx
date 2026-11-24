@@ -6,6 +6,7 @@ import { reveal, rowSpring, spring } from "../lib/motion";
 import { useStore, useView } from "../lib/store";
 import { TodoFloat } from "./AgentCards";
 import { Composer } from "./Composer";
+import { QuestionDock } from "./QuestionDock";
 import { MessageView } from "./MessageView";
 import { Button, Empty } from "./ui";
 
@@ -54,6 +55,7 @@ export function ChatView() {
       {loading ? <div className="messages" /> : <Messages key={current!.id} streaming={streaming} />}
       {!loading && <TodoFloat />}
       <div className="dock">
+        {!loading && <QuestionDock />}
         <Composer chatId={currentId} streaming={streaming} />
       </div>
       <DropZone />

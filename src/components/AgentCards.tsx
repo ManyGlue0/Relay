@@ -1,7 +1,6 @@
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Activity,
-  Check,
   ChevronRight,
   Circle,
   CircleDot,
@@ -24,7 +23,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { api, errorText, type Answer, type DiffRow, type Part, type Question, type ToolDecision, type ToolDetail } from "../lib/api";
+import { type Answer, type DiffRow, type Part, type Question, type ToolDecision, type ToolDetail } from "../lib/api";
 import { spring } from "../lib/motion";
 import { useStore } from "../lib/store";
 import { useShallow } from "zustand/react/shallow";
@@ -99,7 +98,7 @@ const EDITS = new Set(["write_file", "edit_file", "delete_path"]);
 const SHELLS = new Set(["powershell", "bash", "cmd"]);
 
 export function AgentToolCard({ part, messageId }: { part: ToolPart; messageId: string }) {
-  if (part.tool === "ask_user") return <QuestionCard part={part} messageId={messageId} />;
+  if (part.tool === "ask_user") return <QuestionCard part={part} />;
   if (part.tool === "todo") return <TodoCard part={part} />;
   if (part.tool === "summarize") return <SummaryDivider part={part} />;
   return <StepCard part={part} messageId={messageId} />;
@@ -272,88 +271,35 @@ function CommandLine({ shell, text }: { shell: string; text: string }) {
   );
 }
 
-/** The model's questions: pick options (or write your own), then send. */
-function QuestionCard({ part, messageId }: { part: ToolPart; messageId: string }) {
+/** The model's questions in the conversation: while they wait, a line (you
+ *  answer in the dock above the composer, `QuestionDock`); after, what it
+ *  asked and what you said. */
+function QuestionCard({ part }: { part: ToolPart }) {
   const qs: Question[] = part.detail?.questions ?? [];
-  const asking = part.status === "question";
-  const [answers, setAnswers] = useState<Answer[]>(() => qs.map(() => ({ picked: [], other: "" })));
-  const [sending, setSending] = useState(false);
   const given = part.detail?.answers;
-  const send = async (value: Answer[] | null) => {
-    setSending(true);
-    try {
-      await api.answerTool(messageId, part.id, value);
-    } catch (e) {
-      useStore.getState().toast(errorText(e));
-    } finally {
-      setSending(false);
-    }
-  };
-  const toggle = (i: number, label: string, multiple: boolean) =>
-    setAnswers((all) =>
-      all.map((a, j) => {
-        if (j !== i) return a;
-        const on = a.picked.includes(label);
-        if (multiple) return { ...a, picked: on ? a.picked.filter((x) => x !== label) : [...a.picked, label] };
-        return { ...a, picked: on ? [] : [label] };
-      }),
-    );
-  const ready = answers.some((a) => a.picked.length > 0 || a.other.trim());
-  return (
-    <div className={`tool-card question-card ${asking ? "approval" : ""}`}>
-      <div className="question-head">
-        <span className="tool-well">
-          <MessageCircleQuestion size={13} />
-        </span>
-        <span className="tool-verb">{asking ? (qs.length === 1 ? "A question for you" : `${qs.length} questions for you`) : "Asked you"}</span>
+  if (part.status === "question") {
+    return (
+      <div className="question-line asking">
+        <MessageCircleQuestion size={13} />
+        <span>{qs.length === 1 ? "Asked you a question: answer it above the message box" : `Asked you ${qs.length} questions: answer them above the message box`}</span>
       </div>
-      {qs.map((q, i) => (
-        <div key={i} className="question">
-          <div className="question-text">
-            {q.header && <span className="question-tag">{q.header}</span>}
-            {q.question}
-          </div>
-          {asking ? (
-            <>
-              <div className="question-options">
-                {q.options.map((o) => {
-                  const on = answers[i]?.picked.includes(o.label);
-                  return (
-                    <button key={o.label} className={`question-option ${on ? "on" : ""}`} onClick={() => toggle(i, o.label, q.multiple)} aria-pressed={on}>
-                      <span className={`question-mark ${q.multiple ? "qm-box" : "qm-dot"}`}>{on && <Check size={11} strokeWidth={3} />}</span>
-                      <span className="question-option-text">
-                        <span className="question-label">{o.label}</span>
-                        {o.description && <span className="question-desc">{o.description}</span>}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-              <input
-                className="question-other"
-                placeholder="Other: write your own answer"
-                value={answers[i]?.other ?? ""}
-                onChange={(e) => setAnswers((all) => all.map((a, j) => (j === i ? { ...a, other: e.target.value } : a)))}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && ready && !sending) void send(answers);
-                }}
-              />
-            </>
-          ) : (
-            <div className="question-answer">{answerText(given?.[i]) ?? (given === null ? "Not answered" : part.status === "denied" ? "Stopped" : "…")}</div>
-          )}
-        </div>
-      ))}
-      {asking && (
-        <div className="tool-ask-bar question-bar">
-          <span className="tool-ask-text">{qs.some((q) => q.multiple) ? "Pick one or more, or write your own" : "Pick one, or write your own"}</span>
-          <Button variant="ghost" disabled={sending} onClick={() => void send(null)}>
-            Skip
-          </Button>
-          <Button variant="primary" disabled={!ready || sending} onClick={() => void send(answers)}>
-            Send answers
-          </Button>
-        </div>
+    );
+  }
+  return (
+    <div className="question-recap">
+      <div className="question-line">
+        <MessageCircleQuestion size={13} />
+        <span>{given === null ? "Asked you (skipped)" : part.status === "denied" ? "Asked you (stopped)" : "Asked you"}</span>
+      </div>
+      {given !== null && part.status !== "denied" && (
+        <ul className="question-recap-list">
+          {qs.map((q, i) => (
+            <li key={i}>
+              <span className="question-recap-q">{q.question}</span>
+              <span className="question-recap-a">{answerText(given?.[i]) ?? "…"}</span>
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   );

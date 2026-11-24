@@ -130,8 +130,8 @@ export default function App() {
         consume();
         if (st.settingsOpen) st.closeSettings();
         else st.openSettings();
-      } else if (!inField && !st.settingsOpen && !e.ctrlKey && !e.altKey && !e.metaKey && e.key.length === 1 && !document.querySelector(".popover, .modal")) {
-        // Typing anywhere goes to the message box.
+      } else if (!inField && !st.settingsOpen && !e.ctrlKey && !e.altKey && !e.metaKey && e.key.length === 1 && !document.querySelector(".popover, .modal") && !(e.target as Element | null)?.closest?.(".qdock")) {
+        // Typing anywhere goes to the message box (not while answering the model's questions: their keys pick options).
         document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus();
       }
     };

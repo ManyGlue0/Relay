@@ -60,6 +60,14 @@ export interface Settings {
   view: ChatKind;
   /** The mode a new Agent session starts with (the last one used). */
   agentMode: AgentMode;
+  /** Files bigger than this (MB) aren't protected by checkpoints. */
+  checkpointFileMb: number;
+  /** The checkpoint store's soft budget per folder (GB). */
+  checkpointBudgetGb: number;
+  /** Agent sessions get a cmd.exe tool too. */
+  agentCmd: boolean;
+  /** Folders' own Auto settings, by the folder's full path in lowercase. */
+  folders: Record<string, { autoPush: boolean; allowSecrets: string[] }>;
 }
 
 /** A chat, or an Agent session (a chat that works in a folder). */

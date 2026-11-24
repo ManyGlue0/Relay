@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   BarChart3,
   BookMarked,
+  Bot,
   ChevronRight,
   Ellipsis,
   FolderClosed,
@@ -40,6 +41,7 @@ export const SECTIONS: { id: SettingsSection; label: string; icon: LucideIcon }[
   { id: "presets", label: "Presets", icon: Settings2 },
   { id: "tools", label: "Tools", icon: Wrench },
   { id: "skills", label: "Skills", icon: BookMarked },
+  { id: "agent", label: "Agent", icon: Bot },
   { id: "stats", label: "Stats", icon: BarChart3 },
   { id: "about", label: "About", icon: Info },
 ];

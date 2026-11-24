@@ -3,6 +3,7 @@ import { useCallback } from "react";
 import { pageSpring } from "../../lib/motion";
 import { useEscape, useStore } from "../../lib/store";
 import { About } from "./About";
+import { Agent } from "./Agent";
 import { General } from "./General";
 import { Models } from "./Models";
 import { Presets } from "./Presets";
@@ -37,6 +38,7 @@ export function SettingsPage() {
         {section === "presets" && <Presets />}
         {section === "tools" && <Tools />}
         {section === "skills" && <Skills />}
+        {section === "agent" && <Agent />}
         {section === "stats" && <Stats />}
         {section === "about" && <About />}
       </motion.div>

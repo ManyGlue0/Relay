@@ -28,7 +28,7 @@ import {
 } from "./api";
 import { prepare } from "./media";
 
-export type SettingsSection = "general" | "you" | "models" | "presets" | "tools" | "skills" | "stats" | "about";
+export type SettingsSection = "general" | "you" | "models" | "presets" | "tools" | "skills" | "agent" | "stats" | "about";
 
 export interface Toast {
   id: number;

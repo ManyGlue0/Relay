@@ -1105,7 +1105,7 @@ pub fn agent_folder_settings(core: CoreState, folder: String) -> FolderSettings 
 pub fn agent_set_folder_settings(core: CoreState, folder: String, auto_push: Option<bool>, secret: Option<String>, allow: Option<bool>) -> FolderSettings {
     let key = agent::folder_key(std::path::Path::new(&folder));
     core.prefs.update(|s| {
-        let f = s.folders.entry(key).or_default();
+        let f = s.folders.entry(key.clone()).or_default();
         if let Some(p) = auto_push {
             f.auto_push = p;
         }
@@ -1114,6 +1114,10 @@ pub fn agent_set_folder_settings(core: CoreState, folder: String, auto_push: Opt
             if allow {
                 f.allow_secrets.push(name);
             }
+        }
+        // Back to the defaults: nothing to keep.
+        if *f == crate::settings::FolderPrefs::default() {
+            s.folders.remove(&key);
         }
     });
     agent_folder_settings(core, folder)

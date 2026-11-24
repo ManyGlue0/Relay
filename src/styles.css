@@ -4340,3 +4340,10 @@ button.summary-divider:hover .summary-label {
 .git-note {
   color: var(--text-2);
 }
+
+/* Settings → Agent: a folder's row. */
+.agent-folder {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}

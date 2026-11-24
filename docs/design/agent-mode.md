@@ -1,6 +1,6 @@
 # Agent mode
 
-Status: **built** (all nine steps of the build order are done; an Agent section in Settings is still to come). Target: Relay 0.7.0. Written 2026-11-23 from a
+Status: **built** (all nine steps of the build order, and Settings → Agent). Target: Relay 0.7.0. Written 2026-11-23 from a
 question-and-answer design session with Andrea and two review rounds; the first
 six open questions were answered the same day. What's still open is listed at
 the end.

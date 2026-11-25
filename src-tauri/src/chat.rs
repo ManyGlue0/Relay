@@ -1346,9 +1346,21 @@ impl Job {
             { "role": "system", "content": "You summarize work sessions between a user and a coding agent, so the agent can carry on from the summary." },
             { "role": "user", "content": format!("The session so far:\n\n{}\n\n---\n\n{SUMMARY_REQUEST}", transcript(&input, max.max(8_000))) }
         ]);
-        let res = tokio::select! {
-            r = crate::llm::complete(&self.api, &self.base, self.key.as_deref(), body) => Some(r),
-            _ = self.token.cancelled() => None,
+        // Streamed, like a reply: reading a long session can take the server
+        // minutes before the first word, and a stream only gives up after
+        // `limits::IDLE` of silence (a plain request had a 120 s limit).
+        let mut text = String::new();
+        let res = match llm::stream_chat(&self.api, &self.base, self.key.as_deref(), body, &self.token, |e| {
+            if let Event::Content(t) = e {
+                text.push_str(&t);
+            }
+        })
+        .await
+        {
+            Ok(End::Done) => Some(Ok(text)),
+            Ok(End::Cancelled) => None,
+            Err(_) if self.token.is_cancelled() => None,
+            Err(e) => Some(Err(e)),
         };
         let ms = Some(t0.elapsed().as_millis() as u64);
         let summary = match res {

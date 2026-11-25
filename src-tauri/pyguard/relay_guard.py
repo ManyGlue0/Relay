@@ -52,7 +52,10 @@ class _Guard:
         self.bypass = bool(cfg.get("bypass"))
 
     def zone(self, p):
-        if any(_within(p, c) for c in self.credentials):
+        # A credential location holding the folder (a workspace inside Relay's
+        # data) doesn't cover the folder itself; one inside the folder does.
+        inside = _within(p, self.folder)
+        if any(_within(p, c) and not (inside and _within(self.folder, c)) for c in self.credentials):
             return "credential"
         if _within(p, self.folder):
             return "folder"

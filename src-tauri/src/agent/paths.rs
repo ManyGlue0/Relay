@@ -222,9 +222,12 @@ pub fn scratch_roots() -> Vec<PathBuf> {
 }
 
 /// Which zone a full, real path is in. Credential locations win over
-/// everything (Relay's own data folder holds the checkpoint store).
+/// everything (Relay's own data folder holds the checkpoint store), except
+/// that one holding the folder (a workspace Relay made, inside its data)
+/// doesn't cover the folder itself; one inside the folder (its own .ssh) does.
 pub fn zone(p: &Path, folder: &Path, credentials: &[PathBuf], scratch: &[PathBuf]) -> Zone {
-    if credentials.iter().any(|c| within(p, c)) {
+    let inside = within(p, folder);
+    if credentials.iter().any(|c| within(p, c) && !(inside && within(folder, c))) {
         return Zone::Credential;
     }
     if within(p, folder) {
@@ -276,5 +279,15 @@ mod tests {
         assert_eq!(zone(&resolve(&folder, "a.txt"), &folder, &creds, &scratch), Zone::Folder);
         assert_eq!(zone(&real(&home.join("Documents\\x.txt")), &folder, &creds, &scratch), Zone::Protected);
         assert_eq!(zone(&real(&std::env::temp_dir().join("other\\y")), &folder, &creds, &scratch), Zone::Scratch);
+        // A workspace inside a credential location (Relay's data): its files are
+        // the folder's; the data beside it, other workspaces and a credential
+        // location inside the folder stay credentials.
+        let data = std::env::temp_dir().join("relay-zone-data");
+        let ws = data.join("workspaces").join("s1");
+        let creds = vec![data.clone(), ws.join(".ssh")];
+        assert_eq!(zone(&ws.join("a.txt"), &ws, &creds, &[]), Zone::Folder);
+        assert_eq!(zone(&data.join("relay.db"), &ws, &creds, &[]), Zone::Credential);
+        assert_eq!(zone(&data.join("workspaces").join("s2").join("x"), &ws, &creds, &[]), Zone::Credential);
+        assert_eq!(zone(&ws.join(".ssh").join("id_rsa"), &ws, &creds, &[]), Zone::Credential);
     }
 }

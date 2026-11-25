@@ -49,6 +49,7 @@ export function Stats() {
       <div className="tiles">
         <Tile label="Chats" value={usage ? usage.chats.toLocaleString() : "…"} />
         <Tile label="Replies" value={usage ? usage.replies.toLocaleString() : "…"} />
+        <Tile label="Tokens read" value={usage ? compact(usage.readTokens) : "…"} hint="By the models" />
         <Tile label="Tokens written" value={usage ? compact(usage.completionTokens) : "…"} hint="By the models" />
         <Tile label="Tool calls" value={usage ? usage.toolCalls.toLocaleString() : "…"} />
       </div>
@@ -72,7 +73,7 @@ function localDay(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-type Bucket = { key: string; start: Date; tokens: number; replies: number };
+type Bucket = { key: string; start: Date; tokens: number; read: number; written: number; replies: number };
 
 function addDays(d: Date, n: number): Date {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
@@ -100,19 +101,21 @@ function buckets(days: Usage["days"], range: Range): { list: Bucket[]; unit: "da
     const k = keyOf(d);
     let b = list[list.length - 1];
     if (!b || b.key !== k) {
-      b = { key: k, start: d, tokens: 0, replies: 0 };
+      b = { key: k, start: d, tokens: 0, read: 0, written: 0, replies: 0 };
       list.push(b);
     }
     const v = byDay.get(localDay(d));
     if (v) {
-      b.tokens += v.tokens;
+      b.read += v.read;
+      b.written += v.written;
+      b.tokens += v.read + v.written;
       b.replies += v.replies;
     }
   }
   return { list, unit };
 }
 
-/** Tokens written over time: one hue, bars anchored to the baseline, hover for the numbers. */
+/** Tokens over time (read + written): one hue, bars anchored to the baseline, hover for each. */
 function DailyChart({ days, range }: { days: Usage["days"]; range: Range }) {
   const [hover, setHover] = useState<number | null>(null);
   const { list: series, unit } = useMemo(() => buckets(days, range), [days, range]);
@@ -129,6 +132,10 @@ function DailyChart({ days, range }: { days: Usage["days"]; range: Range }) {
   const ticks = [0, nice / 2, nice];
   const labelEvery = Math.max(1, Math.ceil(series.length / 6));
   const h = hover != null ? series[hover] : null;
+  // Where the tip points (percent of the width): centered on its bar, but kept
+  // inside the chart near either end.
+  const at = hover != null ? ((pad.l + (hover + 0.5) * slot) / W) * 100 : 0;
+  const shift = at > 82 ? "-100%" : at < 18 ? "0%" : "-50%";
   const fmt = (d: Date) =>
     unit === "month" ? d.toLocaleDateString([], { month: "short", year: "2-digit" }) : d.toLocaleDateString([], { month: "short", day: "numeric" });
   const tipTitle = (b: Bucket) =>
@@ -139,9 +146,9 @@ function DailyChart({ days, range }: { days: Usage["days"]; range: Range }) {
         : b.start.toLocaleDateString([], { month: "long", year: "numeric" });
 
   return (
-    <Group title={unit === "day" ? "Tokens written per day" : unit === "week" ? "Tokens written per week" : "Tokens written per month"}>
+    <Group title={unit === "day" ? "Tokens per day" : unit === "week" ? "Tokens per week" : "Tokens per month"}>
       <div className="chart" onMouseLeave={() => setHover(null)}>
-        <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label="Tokens written over time">
+        <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label="Tokens read and written over time">
           {ticks.map((t) => {
             const y = pad.t + plotH - (t / nice) * plotH;
             return (
@@ -181,16 +188,17 @@ function DailyChart({ days, range }: { days: Usage["days"]; range: Range }) {
           {h && (
             <motion.div
               className="chart-tip"
-              style={{ left: `${((pad.l + (hover! + 0.5) * slot) / W) * 100}%` }}
+              // framer-motion owns the transform (it animates y), so it does the centering too.
+              style={{ left: `${at}%`, x: shift }}
               initial={{ opacity: 0, y: 4 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, transition: { duration: 0.08 } }}
               transition={{ duration: 0.12 }}
             >
               <div className="chart-tip-title">{tipTitle(h)}</div>
-              <div>
-                {h.tokens.toLocaleString()} tokens · {h.replies === 1 ? "1 reply" : `${h.replies} replies`}
-              </div>
+              <div>{h.read.toLocaleString()} read</div>
+              <div>{h.written.toLocaleString()} written</div>
+              <div className="chart-tip-sub">{h.replies === 1 ? "1 reply" : `${h.replies} replies`}</div>
             </motion.div>
           )}
         </AnimatePresence>
@@ -215,7 +223,8 @@ function ModelTable({ usage }: { usage: Usage }) {
             <tr>
               <th>Model</th>
               <th className="num">Replies</th>
-              <th className="num">Tokens written</th>
+              <th className="num">Read</th>
+              <th className="num">Written</th>
               <th className="num">Speed</th>
               <th className="num">First token</th>
               <th className="num">Tool calls</th>
@@ -232,6 +241,7 @@ function ModelTable({ usage }: { usage: Usage }) {
                   {m.replies.toLocaleString()}
                   {m.errors > 0 && <div className="cell-sub">{m.errors} failed</div>}
                 </td>
+                <td className="num">{compact(m.readTokens)}</td>
                 <td className="num">{compact(m.completionTokens)}</td>
                 <td className="num">{m.avgTokensPerSec ? `${m.avgTokensPerSec.toFixed(m.avgTokensPerSec < 10 ? 1 : 0)} tok/s` : "–"}</td>
                 <td className="num">{m.avgTtftMs != null ? seconds(m.avgTtftMs) : "–"}</td>

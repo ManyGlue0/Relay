@@ -766,7 +766,11 @@ fn prepare(core: &Core, chat: &crate::db::Chat, history: &[Message], provider_id
     // Not again right after a summary that didn't bring it down (the system
     // prompt and tools may fill most of a small context on their own).
     let just_summarized = history.iter().rev().find(|m| m.role == "assistant").and_then(|m| m.parts.as_ref()).is_some_and(|p| p.to_string().contains("\"tool\":\"summarize\""));
-    let summarize_first = agent.is_some() && !just_summarized && matches!((used, context), (Some(u), Some(c)) if u as f64 >= SUMMARIZE_AT * c as f64);
+    // What's about to be sent counts too: the last reply's numbers miss the new
+    // message, older builds' replies miss their last answer, and a reply that
+    // dropped old tool outputs measured less than the full history sent now.
+    let size = used.unwrap_or(0).max(estimate_tokens(&messages) + estimate_tokens(&specs));
+    let summarize_first = agent.is_some() && !just_summarized && context.is_some_and(|c| size as f64 >= SUMMARIZE_AT * c as f64);
     Ok(Prepared { provider, body, messages, specs, routes, settings, agent, context, summarize_first })
 }
 
@@ -983,11 +987,37 @@ pub(crate) fn context_of(stats: &Value) -> Option<u64> {
     stats.get("contextTokens").and_then(Value::as_u64).or_else(|| stats.get("promptTokens").and_then(Value::as_u64))
 }
 
+/// About how many tokens a request's messages (or tools) take: text at 2.75
+/// bytes a token, what an agent session's code, paths and output came to
+/// (prose runs nearer 4, so this errs early), images and other inline files a
+/// flat 1,500. Relay's own `_relay` / `_native` keys aren't sent as they are.
+pub(crate) fn estimate_tokens<T: Serialize>(v: &T) -> u64 {
+    fn walk(v: &Value, bytes: &mut u64, files: &mut u64) {
+        match v {
+            Value::String(s) if s.starts_with("data:") => *files += 1,
+            Value::String(s) => *bytes += s.len() as u64,
+            Value::Array(a) => a.iter().for_each(|x| walk(x, bytes, files)),
+            Value::Object(o) => o.iter().filter(|(k, _)| *k != "_relay" && *k != "_native").for_each(|(_, x)| walk(x, bytes, files)),
+            _ => {}
+        }
+    }
+    let (mut bytes, mut files) = (0, 0);
+    walk(&serde_json::to_value(v).unwrap_or(Value::Null), &mut bytes, &mut files);
+    bytes * 4 / 11 + files * 1_500
+}
+
 /// A continued reply's stats: time and tokens of both parts added up.
 fn merge_stats(old: &Value, mut new: Value) -> Value {
     for k in ["totalMs", "completionTokens"] {
         let sum = old.get(k).and_then(Value::as_u64).unwrap_or(0) + new.get(k).and_then(Value::as_u64).unwrap_or(0);
         new[k] = json!(sum);
+    }
+    // Everything both parts read (an older reply counts its last request).
+    let old_read = old.get("readTokens").or_else(|| old.get("promptTokens")).and_then(Value::as_u64);
+    if let Some(n) = new.get("readTokens").and_then(Value::as_u64) {
+        new["readTokens"] = json!(n + old_read.unwrap_or(0));
+    } else if let Some(n) = old_read {
+        new["readTokens"] = json!(n);
     }
     if let Some(t) = old.get("ttftMs").filter(|t| t.is_u64()) {
         new["ttftMs"] = t.clone();
@@ -1585,7 +1615,13 @@ impl Job {
         let mut first_token: Option<Instant> = None;
         let mut gen_secs = 0.0f64;
         let mut prompt_tokens: Option<u64> = None;
+        // The estimate of the request `prompt_tokens` measured, and of the one in flight.
+        let mut measured_est: Option<u64> = None;
+        let mut sending_est: u64;
+        let specs_est = estimate_tokens(&self.specs);
         let mut completion_tokens: u64 = 0;
+        // Every round's request added up: all the model read.
+        let mut read_tokens: u64 = 0;
         // The last round's request plus its answer: the context the next request starts from.
         let mut context_tokens: Option<u64> = None;
         let mut have_usage = false;
@@ -1631,22 +1667,25 @@ impl Job {
         }
         // Old tool outputs were dropped this reply (the step before summarizing).
         let mut trimmed = false;
-        // The prompt size last acted on (each round's usage is checked once).
-        let mut checked: Option<u64> = None;
 
         'rounds: for round in 0..=self.max_rounds {
             // A long reply nearing the context's end: old tool outputs go first,
             // then the session is summarized and the reply carries on from that.
+            // The size is the next request's: the last measured one, plus what
+            // was added since (its answer, tool results), estimated.
             if round > 0 && self.agent.is_some() {
-                if let (Some(c), Some(p)) = (self.context, prompt_tokens) {
-                    if fresh && checked != Some(p) {
-                        floor = Some(p);
+                let now_est = estimate_tokens(&messages) + specs_est;
+                if let Some(c) = self.context {
+                    let size = match (prompt_tokens, measured_est) {
+                        (Some(p), Some(e)) => (p as i64 + now_est as i64 - e as i64).max(0) as u64,
+                        _ => now_est,
+                    };
+                    if fresh {
+                        floor = Some(size);
                         fresh = false;
-                        checked = Some(p);
                     }
-                    let grown = floor.map_or(true, |f| p > f + c.saturating_sub(f) / 2);
-                    if p as f64 >= SUMMARIZE_AT * c as f64 && checked != Some(p) && grown {
-                        checked = Some(p);
+                    let grown = floor.map_or(true, |f| size > f + c.saturating_sub(f) / 2);
+                    if size as f64 >= SUMMARIZE_AT * c as f64 && grown {
                         if trimmed || !drop_old_outputs(&mut messages) {
                             self.summarize(&mut tr, &mut messages, false).await;
                             trimmed = false;
@@ -1662,6 +1701,7 @@ impl Job {
                 None => self.body.clone(),
             };
             body["messages"] = json!(messages);
+            sending_est = estimate_tokens(&messages) + specs_est;
             // The last round must answer with words.
             if !self.specs.is_empty() && round < self.max_rounds {
                 body["tools"] = json!(self.specs);
@@ -1758,6 +1798,8 @@ impl Job {
             if let Some((p, c)) = round_usage {
                 // The last round's prompt is the whole conversation: that's the context in use.
                 prompt_tokens = Some(p);
+                measured_est = Some(sending_est);
+                read_tokens += p;
                 completion_tokens += c;
                 context_tokens = Some(p + c);
                 have_usage = true;
@@ -1988,6 +2030,7 @@ impl Job {
             "thinkMs": if think_ms > 0 { Some(think_ms) } else { None },
             "totalMs": ended.duration_since(started).as_millis() as u64,
             "promptTokens": prompt_tokens,
+            "readTokens": if have_usage { Some(read_tokens) } else { None },
             "completionTokens": completion_tokens,
             "contextTokens": context_tokens,
             "estimated": !have_usage,
@@ -2239,6 +2282,19 @@ mod tests {
     }
 
     #[test]
+    fn the_estimate_counts_text_not_inline_files_or_relays_keys() {
+        let text = "x".repeat(11_000);
+        let m = vec![
+            json!({ "role": "tool", "content": text }),
+            json!({ "role": "user", "content": [{ "type": "image_url", "image_url": { "url": format!("data:image/png;base64,{}", "A".repeat(1_000_000)) } }] }),
+            json!({ "role": "assistant", "content": "", "_native": [{ "text": "y".repeat(50_000) }], "_relay": { "id": "m" } }),
+        ];
+        // 11,000 bytes of text, one inline file; Relay's keys left out.
+        let n = estimate_tokens(&m);
+        assert!((5_500..5_600).contains(&n), "{n}");
+    }
+
+    #[test]
     fn context_is_the_last_request_and_its_answer() {
         // Every round's answers added up are mostly inside the last request already.
         let s = json!({ "promptTokens": 190_000, "completionTokens": 153_000, "contextTokens": 190_400 });
@@ -2442,5 +2498,8 @@ fix it") && t.contains("TOOL CALL agent__read_file"));
         assert_eq!(s["ttftMs"], 200);
         assert_eq!(s["estimated"], true);
         assert_eq!(s["finishReason"], "stop");
+        // Read tokens add up; an older first part counts its last request.
+        let s = merge_stats(&json!({ "promptTokens": 300 }), json!({ "readTokens": 900 }));
+        assert_eq!(s["readTokens"], 1200);
     }
 }

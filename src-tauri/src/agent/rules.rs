@@ -1369,6 +1369,21 @@ mod tests {
     }
 
     #[test]
+    fn a_workspace_inside_relays_data_is_the_folder() {
+        // Relay's workspaces live in its data folder, a credential location.
+        let f = Fixture::new("ws");
+        let data = f.folder.parent().unwrap().to_path_buf();
+        let creds = vec![data.clone()];
+        let mut r = f.rules();
+        r.credentials = &creds;
+        for line in ["1..3 | ForEach-Object { \\\"line $_ of the output\\\" }", "Get-Content README.md", "python ok.py"] {
+            assert!(judge_line(&r, Shell::PowerShell, line).is_ok(), "{line}");
+        }
+        let beside = data.join("relay.db").to_string_lossy().into_owned();
+        assert_eq!(judge_line(&r, Shell::PowerShell, &format!("Get-Content '{beside}'")).unwrap_err().rule, "reading credentials");
+    }
+
+    #[test]
     fn bash_rules() {
         let f = Fixture::new("bash");
         let refused = [

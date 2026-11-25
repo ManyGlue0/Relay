@@ -3550,7 +3550,7 @@ body.resizing .titlebar-title {
 /* Stats */
 .tiles {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
   margin-top: 16px;
 }
@@ -3608,7 +3608,6 @@ body.resizing .titlebar-title {
 .chart-tip {
   position: absolute;
   top: 0;
-  transform: translateX(-50%);
   padding: 6px 9px;
   border-radius: 9px;
   background: var(--pop-bg);
@@ -3621,6 +3620,9 @@ body.resizing .titlebar-title {
 }
 .chart-tip-title {
   font-weight: 600;
+}
+.chart-tip-sub {
+  color: var(--text-3);
 }
 .table-scroll {
   overflow-x: auto;

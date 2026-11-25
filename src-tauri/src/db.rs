@@ -573,7 +573,8 @@ pub struct ModelUsage {
     pub provider_id: Option<String>,
     pub model: String,
     pub replies: i64,
-    pub prompt_tokens: i64,
+    /// Every request's prompt added up (an agent reads the conversation again each step).
+    pub read_tokens: i64,
     pub completion_tokens: i64,
     pub avg_tokens_per_sec: Option<f64>,
     pub avg_ttft_ms: Option<f64>,
@@ -588,7 +589,8 @@ pub struct DayUsage {
     /// Local date, "YYYY-MM-DD".
     pub day: String,
     pub replies: i64,
-    pub tokens: i64,
+    pub read: i64,
+    pub written: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -597,7 +599,7 @@ pub struct Usage {
     pub chats: i64,
     pub messages: i64,
     pub replies: i64,
-    pub prompt_tokens: i64,
+    pub read_tokens: i64,
     pub completion_tokens: i64,
     pub tool_calls: i64,
     pub models: Vec<ModelUsage>,
@@ -1445,10 +1447,10 @@ impl Db {
             let chats: i64 = c.query_row("SELECT count(DISTINCT chat_id) FROM messages WHERE created_at >= ?1", [since], |r| r.get(0))?;
             let messages: i64 = c.query_row("SELECT count(*) FROM messages WHERE created_at >= ?1", [since], |r| r.get(0))?;
             let tool_calls_of = "COALESCE((SELECT count(*) FROM json_each(m.parts) WHERE json_extract(json_each.value, '$.type') = 'tool'), 0)";
-            let (replies, prompt_tokens, completion_tokens, tool_calls): (i64, i64, i64, i64) = c.query_row(
+            let (replies, read_tokens, completion_tokens, tool_calls): (i64, i64, i64, i64) = c.query_row(
                 &format!(
                     "SELECT count(*),
-                        COALESCE(sum(json_extract(m.stats, '$.promptTokens')), 0),
+                        COALESCE(sum(COALESCE(json_extract(m.stats, '$.readTokens'), json_extract(m.stats, '$.promptTokens'))), 0),
                         COALESCE(sum(json_extract(m.stats, '$.completionTokens')), 0),
                         COALESCE(sum({tool_calls_of}), 0)
                      FROM messages m WHERE m.role = 'assistant' AND m.created_at >= ?1"
@@ -1458,7 +1460,7 @@ impl Db {
             )?;
             let mut st = c.prepare(&format!(
                 "SELECT m.provider_id, m.model, count(*),
-                    COALESCE(sum(json_extract(m.stats, '$.promptTokens')), 0),
+                    COALESCE(sum(COALESCE(json_extract(m.stats, '$.readTokens'), json_extract(m.stats, '$.promptTokens'))), 0),
                     COALESCE(sum(json_extract(m.stats, '$.completionTokens')), 0),
                     avg(json_extract(m.stats, '$.tokensPerSec')),
                     avg(json_extract(m.stats, '$.ttftMs')),
@@ -1474,7 +1476,7 @@ impl Db {
                         provider_id: r.get(0)?,
                         model: r.get(1)?,
                         replies: r.get(2)?,
-                        prompt_tokens: r.get(3)?,
+                        read_tokens: r.get(3)?,
                         completion_tokens: r.get(4)?,
                         avg_tokens_per_sec: r.get(5)?,
                         avg_ttft_ms: r.get(6)?,
@@ -1486,14 +1488,15 @@ impl Db {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let mut st = c.prepare(
                 "SELECT date(m.created_at / 1000, 'unixepoch', 'localtime') AS d, count(*),
+                    COALESCE(sum(COALESCE(json_extract(m.stats, '$.readTokens'), json_extract(m.stats, '$.promptTokens'))), 0),
                     COALESCE(sum(json_extract(m.stats, '$.completionTokens')), 0)
                  FROM messages m WHERE m.role = 'assistant' AND m.created_at >= ?1
                  GROUP BY d ORDER BY d",
             )?;
             let days = st
-                .query_map([since], |r| Ok(DayUsage { day: r.get(0)?, replies: r.get(1)?, tokens: r.get(2)? }))?
+                .query_map([since], |r| Ok(DayUsage { day: r.get(0)?, replies: r.get(1)?, read: r.get(2)?, written: r.get(3)? }))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(Usage { chats, messages, replies, prompt_tokens, completion_tokens, tool_calls, models, days })
+            Ok(Usage { chats, messages, replies, read_tokens, completion_tokens, tool_calls, models, days })
         })
     }
 }
@@ -1614,11 +1617,14 @@ mod tests {
         let parts = json!([{ "type": "tool", "id": "1" }, { "type": "text", "text": "a" }]);
         let stats = json!({ "promptTokens": 10, "completionTokens": 5, "tokensPerSec": 20.0, "ttftMs": 300 });
         db.finish_message(&a.id, "a", "", &parts, "done", None, &stats).unwrap();
+        // A reply from before readTokens counts its last request.
+        let b = db.add_message(&chat.id, Some(&a.id), "assistant", "", &[], Some("p"), Some("m"), "streaming").unwrap();
+        db.finish_message(&b.id, "b", "", &json!([]), "done", None, &json!({ "promptTokens": 40, "readTokens": 100, "completionTokens": 7 })).unwrap();
         let usage = db.usage(Some(30)).unwrap();
-        assert_eq!(db.usage(None).unwrap().replies, 1);
-        assert_eq!((usage.replies, usage.prompt_tokens, usage.completion_tokens, usage.tool_calls), (1, 10, 5, 1));
-        assert_eq!(usage.models[0].model, "m");
-        assert_eq!(usage.days.len(), 1);
+        assert_eq!(db.usage(None).unwrap().replies, 2);
+        assert_eq!((usage.replies, usage.read_tokens, usage.completion_tokens, usage.tool_calls), (2, 110, 12, 1));
+        assert_eq!((usage.models[0].model.as_str(), usage.models[0].read_tokens), ("m", 110));
+        assert_eq!((usage.days.len(), usage.days[0].read, usage.days[0].written), (1, 110, 12));
     }
 
     #[test]

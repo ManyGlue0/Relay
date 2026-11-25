@@ -291,6 +291,7 @@ export interface MessageStats {
   completionTokens?: number;
   /** The last round's request plus its answer: the context the next message starts from. */
   contextTokens?: number | null;
+  readTokens?: number | null;
   estimated?: boolean;
   tokensPerSec?: number | null;
   finishReason?: string | null;
@@ -503,7 +504,7 @@ export interface ModelUsage {
   providerId: string | null;
   model: string;
   replies: number;
-  promptTokens: number;
+  readTokens: number;
   completionTokens: number;
   avgTokensPerSec: number | null;
   avgTtftMs: number | null;
@@ -516,11 +517,11 @@ export interface Usage {
   chats: number;
   messages: number;
   replies: number;
-  promptTokens: number;
+  readTokens: number;
   completionTokens: number;
   toolCalls: number;
   models: ModelUsage[];
-  days: { day: string; replies: number; tokens: number }[];
+  days: { day: string; replies: number; read: number; written: number }[];
 }
 
 export const api = {

@@ -475,7 +475,8 @@ export interface HolsterStatus {
 export type Op =
   | { op: "append"; kind: "text" | "reasoning"; text: string }
   | { op: "tool"; part: Part }
-  | { op: "thought"; index: number; ms: number };
+  | { op: "thought"; index: number; ms: number }
+  | { op: "trim"; kind: "text" | "reasoning"; chars: number };
 
 export interface StreamDelta {
   chatId: string;
@@ -668,6 +669,15 @@ export function applyOps(parts: Part[], ops: Op[]): Part[] {
       const i = next.findIndex((x) => x.type === "tool" && x.id === p.id);
       if (i >= 0) next[i] = p;
       else next.push(p);
+    } else if (op.op === "trim") {
+      // A loop's repeats go: the last characters of the last part of that kind.
+      for (let i = next.length - 1; i >= 0; i--) {
+        const p = next[i];
+        if (p.type !== op.kind || (p.type !== "text" && p.type !== "reasoning")) continue;
+        const chars = Array.from(p.text);
+        next[i] = { ...p, text: chars.slice(0, Math.max(0, chars.length - op.chars)).join("") };
+        break;
+      }
     } else {
       const r = next[op.index];
       if (r && r.type === "reasoning") next[op.index] = { ...r, ms: op.ms };

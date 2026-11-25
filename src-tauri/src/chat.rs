@@ -66,6 +66,9 @@ enum Op {
     Tool { part: Part },
     /// The reasoning part at `index` ended after `ms`.
     Thought { index: usize, ms: u64 },
+    /// Drops the last `chars` characters of the last part of this kind (a
+    /// loop's repeats).
+    Trim { kind: &'static str, chars: usize },
 }
 
 fn apply(parts: &mut Vec<Part>, op: &Op) {
@@ -87,8 +90,76 @@ fn apply(parts: &mut Vec<Part>, op: &Op) {
                 *slot = Some(*ms);
             }
         }
+        Op::Trim { kind, chars } => {
+            let last = parts.iter_mut().rev().find_map(|p| match (p, *kind) {
+                (Part::Text { text }, "text") | (Part::Reasoning { text, .. }, "reasoning") => Some(text),
+                _ => None,
+            });
+            if let Some(t) = last {
+                let keep = t.chars().count().saturating_sub(*chars);
+                let at = t.char_indices().nth(keep).map_or(t.len(), |(i, _)| i);
+                t.truncate(at);
+            }
+        }
     }
 }
+
+/// How many back-to-back copies of a block make a loop: thinking that says the
+/// same thing five times over is stuck; an answer gets more room (code can
+/// repeat a line or two legitimately).
+const LOOP_REPEATS_THOUGHT: usize = 5;
+const LOOP_REPEATS_TEXT: usize = 8;
+
+/// Where a text that has started repeating itself should end: after the first
+/// copy of a block (40 to 2,000 bytes, with some variety: not a rule of dashes)
+/// that then comes back `repeats` times in a row up to the end.
+fn loop_cut(s: &str, repeats: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    let n = b.len();
+    for p in 40..=2000usize {
+        if p * repeats > n {
+            break;
+        }
+        // The last `repeats` copies' worth of bytes repeat with period `p`.
+        if b[n - repeats * p..n - p] != b[n - (repeats - 1) * p..n] {
+            continue;
+        }
+        let variety = b[n - p..].iter().filter(|c| !c.is_ascii_whitespace()).collect::<std::collections::HashSet<_>>().len();
+        if variety < 10 {
+            continue;
+        }
+        // Back to where the repeating began, then keep one copy.
+        let mut start = n - repeats * p;
+        while start > 0 && b[start - 1] == b[start - 1 + p] {
+            start -= 1;
+        }
+        let mut cut = start + p;
+        // A copy can start mid-line (the text before it ended the same way):
+        // keep its line whole.
+        if b[cut - 1] != b'\n' {
+            if let Some(i) = b[cut..n.min(cut + p)].iter().position(|&c| c == b'\n') {
+                cut += i + 1;
+            }
+        }
+        while cut < n && !s.is_char_boundary(cut) {
+            cut += 1;
+        }
+        return Some(cut);
+    }
+    None
+}
+
+/// Why a round was cut short by Relay (not by the user).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Cut {
+    /// The model was repeating itself (in its thinking, or in its answer).
+    Loop { thought: bool },
+    /// The round's output was about to fill the context: summarize and go on.
+    Full,
+}
+
+/// What the model is told after a round that looped was cut.
+const LOOP_NOTE: &str = "(Note from Relay: your last attempt got stuck repeating the same thoughts, so it was cut off. Don't go over it again: decide now and act, with a tool call or your answer.)";
 
 /// A reply in progress: its cancel switch, its parts so far (so a chat
 /// opened mid-reply shows everything), and tool calls waiting for the user.
@@ -1679,6 +1750,10 @@ impl Job {
         }
         // Old tool outputs were dropped this reply (the step before summarizing).
         let mut trimmed = false;
+        // A loop was cut once already (the model got its note), and how many
+        // rounds were cut to summarize mid-step.
+        let mut nudged = false;
+        let mut full_cuts = 0u32;
 
         'rounds: for round in 0..=self.max_rounds {
             // A long reply nearing the context's end: old tool outputs go first,
@@ -1733,7 +1808,28 @@ impl Job {
             // out of the message: it would split the text in two on screen.
             let quiet = round == 0 && resume.is_some_and(|r| r.merged);
 
-            let result = llm::stream_chat(&self.api, &self.base, self.key.as_deref(), body, &self.token, |event| {
+            // Relay may cut this round (a loop, or the context about to fill)
+            // without stopping the reply: its own switch, under the reply's.
+            let round_token = self.token.child_token();
+            let mut cut: Option<Cut> = None;
+            // This request's size: the last measured one plus what was added since.
+            let req_size = match (prompt_tokens, measured_est) {
+                (Some(p), Some(e)) => (p as i64 + sending_est as i64 - e as i64).max(0) as u64,
+                _ => sending_est,
+            };
+            let line = self.context.map(|c| (SUMMARIZE_AT * c as f64) as u64);
+            // Only a round that crosses the line is cut, and only twice a reply
+            // (a summary that doesn't bring it down won't loop).
+            let may_cut_full = self.agent.is_some() && full_cuts < 2 && line.is_some_and(|l| req_size < l);
+            let mut out_bytes: u64 = 0;
+            let (mut thought_checked, mut text_checked) = (0usize, 0usize);
+
+            let result = llm::stream_chat(&self.api, &self.base, self.key.as_deref(), body, &round_token, |event| {
+                match &event {
+                    Event::Content(t) | Event::Reasoning(t) => out_bytes += t.len() as u64,
+                    Event::ToolCall { arguments, .. } => out_bytes += arguments.len() as u64,
+                    _ => {}
+                }
                 match event {
                     Event::Content(text) => {
                         round_first.get_or_insert_with(Instant::now);
@@ -1790,6 +1886,28 @@ impl Job {
                     }
                 }
                 tr.flush(false);
+                if cut.is_none() {
+                    // Stuck repeating itself? Checked every 1 KB or so.
+                    if round_thought.len() >= thought_checked + 1024 {
+                        thought_checked = round_thought.len();
+                        if loop_cut(&round_thought, LOOP_REPEATS_THOUGHT).is_some() {
+                            cut = Some(Cut::Loop { thought: true });
+                        }
+                    }
+                    if cut.is_none() && round_text.len() >= text_checked + 1024 {
+                        text_checked = round_text.len();
+                        if loop_cut(&round_text, LOOP_REPEATS_TEXT).is_some() {
+                            cut = Some(Cut::Loop { thought: false });
+                        }
+                    }
+                    // About to fill the context (output at ~3 bytes a token)?
+                    if cut.is_none() && may_cut_full && line.is_some_and(|l| req_size + out_bytes / 3 >= l) {
+                        cut = Some(Cut::Full);
+                    }
+                    if cut.is_some() {
+                        round_token.cancel();
+                    }
+                }
             })
             .await;
 
@@ -1828,6 +1946,40 @@ impl Job {
                 }
             }
             paused = false;
+            // Relay cut the round (the user didn't stop the reply).
+            if let (Some(why), false) = (cut, self.token.is_cancelled()) {
+                if let Cut::Loop { thought } = why {
+                    // One copy stays on screen; the repeats go.
+                    let (s, kind, repeats) =
+                        if thought { (&mut round_thought, "reasoning", LOOP_REPEATS_THOUGHT) } else { (&mut round_text, "text", LOOP_REPEATS_TEXT) };
+                    if let Some(at) = loop_cut(s, repeats) {
+                        let chars = s[at..].chars().count();
+                        s.truncate(at);
+                        tr.op(Op::Trim { kind, chars });
+                        tr.flush(true);
+                    }
+                    if nudged || round >= self.max_rounds {
+                        outcome = Err("The model got stuck repeating itself. Continue to let it try again.".into());
+                        break;
+                    }
+                    nudged = true;
+                    if !round_text.trim().is_empty() {
+                        messages.push(json!({ "role": "assistant", "content": round_text }));
+                    }
+                    messages.push(json!({ "role": "user", "content": LOOP_NOTE }));
+                    continue;
+                }
+                // Cut::Full: the half-done step goes; the session is summarized
+                // and the model carries on from the summary.
+                full_cuts += 1;
+                self.summarize(&mut tr, &mut messages, false).await;
+                trimmed = false;
+                fresh = true;
+                if round >= self.max_rounds {
+                    break;
+                }
+                continue;
+            }
             match result {
                 Ok(End::Done) => {}
                 other => {
@@ -2498,6 +2650,39 @@ fix it") && t.contains("TOOL CALL agent__read_file"));
         let out = history_messages(&[m], History { tools: true, ..History::default() });
         let assistants = out.iter().filter(|m| m["role"] == "assistant").count();
         assert_eq!(assistants, tool_rounds(&parts) + 1);
+    }
+
+    #[test]
+    fn loops_are_caught_and_cut_to_one_copy() {
+        // What a model really wrote 1,046 times over.
+        let block = "Let me think about the treewidth-based DP more carefully. The treewidth-based DP:\n- Compute a tree decomposition of the formula's primal graph.\n- Combine the assignments at the root.\n\nOK let me just start implementing now.\n\n";
+        let head = "Let me brainstorm the novel paradigms → treewidth, GF(2), and more.\n\n";
+        let looped = format!("{head}{}", block.repeat(6));
+        let at = loop_cut(&looped, LOOP_REPEATS_THOUGHT).expect("a loop");
+        assert_eq!(looped[..at].trim_end(), format!("{head}{block}").trim_end());
+        // Four copies isn't a loop yet; cut mid-copy, it still is at six.
+        assert!(loop_cut(&format!("{head}{}", block.repeat(4)), LOOP_REPEATS_THOUGHT).is_none());
+        let partial = format!("{head}{}{}", block.repeat(6), &block[..30]);
+        assert!(loop_cut(&partial, LOOP_REPEATS_THOUGHT).is_some());
+        // Ordinary writing, a rule of dashes and a short repeated line aren't loops.
+        let prose: String = (0..200).map(|i| format!("Step {i}: check the bench output and note what changed.\n")).collect();
+        assert!(loop_cut(&prose, LOOP_REPEATS_THOUGHT).is_none());
+        assert!(loop_cut(&"-".repeat(5000), LOOP_REPEATS_THOUGHT).is_none());
+        assert!(loop_cut(&"assert x == 1\n".repeat(6), LOOP_REPEATS_TEXT).is_none());
+        // Multi-byte text cuts on a character boundary.
+        let ja = "同じことを何度も繰り返しています。もう一度考えてみましょう。\n";
+        let s = format!("始め\n{}", ja.repeat(9));
+        let at = loop_cut(&s, LOOP_REPEATS_TEXT).expect("a loop");
+        assert!(s.is_char_boundary(at));
+        assert_eq!(s[..at].trim_end(), format!("始め\n{ja}").trim_end());
+    }
+
+    #[test]
+    fn trim_drops_the_last_characters_of_that_kind() {
+        let mut parts = vec![Part::Reasoning { text: "think → think → think".into(), ms: None }, Part::Text { text: "answer".into() }];
+        apply(&mut parts, &Op::Trim { kind: "reasoning", chars: 16 });
+        assert_eq!(parts[0], Part::Reasoning { text: "think".into(), ms: None });
+        assert_eq!(parts[1], Part::Text { text: "answer".into() });
     }
 
     #[test]
